@@ -46,5 +46,5 @@ jwt:
 # Super Admin Defaults
 app:
   super-admin:
-    email: ashish@progameflixx.com
-    password: ashish@123
+    email: admin@admin.com
+    password: admin

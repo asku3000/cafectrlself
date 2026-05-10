@@ -7,16 +7,16 @@ import com.progameflixx.cafectrl.entity.Cafe;
 import com.progameflixx.cafectrl.entity.User;
 import com.progameflixx.cafectrl.repository.CafeRepository;
 import com.progameflixx.cafectrl.repository.UserRepository;
+import jakarta.servlet.http.HttpServletRequest;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.ResponseCookie;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.*;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -37,6 +37,8 @@ public class AuthController {
 
     @Autowired
     private JwtService jwtService;
+
+    private static final Logger logger = LoggerFactory.getLogger(AuthController.class);
 
     // Translates: @api.post("/auth/signup")
     @PostMapping("/signup")
@@ -111,5 +113,38 @@ public class AuthController {
         response.put("access_token", token);
 
         return ResponseEntity.ok().header(HttpHeaders.SET_COOKIE, cookie.toString()).body(response);
+    }
+
+    @GetMapping("/me")
+    public ResponseEntity<?> getCurrentUser(HttpServletRequest request) {
+        // 1. Get the token from the header (or cookie)
+        String authHeader = request.getHeader(HttpHeaders.AUTHORIZATION);
+        logger.info("Me api auth header : {}", authHeader);
+        String token = null;
+
+        if (authHeader != null && authHeader.startsWith("Bearer ")) {
+            token = authHeader.substring(7);
+            logger.info("Token {}", token);
+        } else {
+            // Fallback: check the cookie if you're using them
+            // You can also extract this logic into a utility
+            return ResponseEntity.status(401).body("No token found");
+        }
+
+        try {
+            // 2. Validate token and get the email/subject
+            String email = jwtService.extractUsername(token); // Or whatever method your JwtService uses
+
+            Optional<User> userOpt = userRepository.findByEmail(email);
+            if (userOpt.isPresent()) {
+                Map<String, Object> response = new HashMap<>();
+                response.put("user", userOpt.get());
+                return ResponseEntity.ok(response);
+            }
+        } catch (Exception e) {
+            return ResponseEntity.status(401).body("Invalid session");
+        }
+
+        return ResponseEntity.status(401).body("Unauthorized");
     }
 }
