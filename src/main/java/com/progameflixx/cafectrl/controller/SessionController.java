@@ -1,28 +1,31 @@
 package com.progameflixx.cafectrl.controller;
 
-import com.progameflixx.cafectrl.dto.AddItemRequest;
-import com.progameflixx.cafectrl.dto.StartSessionRequest;
+// --- ALL REQUIRED IMPORTS ---
 
-import com.progameflixx.cafectrl.entity.*;
+import com.progameflixx.cafectrl.dto.CheckoutRequest;
+import com.progameflixx.cafectrl.entity.CustomerSession;
+import com.progameflixx.cafectrl.entity.GameSession;
+import com.progameflixx.cafectrl.entity.Resource;
 import com.progameflixx.cafectrl.repository.CustomerSessionRepository;
-import com.progameflixx.cafectrl.repository.InventoryRepository;
 import com.progameflixx.cafectrl.repository.ResourceRepository;
 import com.progameflixx.cafectrl.repository.UserRepository;
+import com.progameflixx.cafectrl.service.BillingService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.Authentication;
-import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.List;
-import java.util.Optional;
+import java.util.Map;
 
+@CrossOrigin(origins = {"http://localhost:3000", "http://localhost:5173"}, allowCredentials = "true", maxAge = 3600)
 @RestController
 @RequestMapping("/api/sessions")
-// Operators, Cafe Admins, and Super Admins can all access these routes
-@PreAuthorize("hasAnyRole('OPERATOR', 'CAFE_ADMIN', 'SUPER_ADMIN')")
+@PreAuthorize("hasAnyRole('CAFE_ADMIN', 'OPERATOR')")
 public class SessionController {
 
     @Autowired
@@ -32,149 +35,195 @@ public class SessionController {
     private ResourceRepository resourceRepository;
 
     @Autowired
-    private InventoryRepository inventoryRepository;
+    private UserRepository userRepository;
 
     @Autowired
-    private UserRepository userRepository; // To get current user details
+    private BillingService billingService;
 
-    // Helper to get current user's cafeId (Translates your `cafe_filter` logic)
-    private String getCurrentCafeId(Authentication auth) {
-        User user = userRepository.findById(auth.getName()).orElseThrow();
-        return user.getCafeId();
+    private String getCafeId(Authentication auth) {
+        return userRepository.findByEmail(auth.getName()).orElseThrow().getCafeId();
     }
 
-    // --- 1. LIST ACTIVE SESSIONS ---
     @GetMapping("/active")
-    public ResponseEntity<List<CustomerSession>> listActiveSessions(Authentication auth) {
-        String cafeId = getCurrentCafeId(auth);
-        List<CustomerSession> activeSessions = sessionRepository.findByCafeIdAndStatus(cafeId, "active");
-        return ResponseEntity.ok(activeSessions);
+    public List<CustomerSession> getActiveSessions(Authentication auth) {
+        return sessionRepository.findByCafeIdAndStatus(getCafeId(auth), "active");
     }
 
-    // --- 2. START A SESSION ---
-    @PostMapping("/")
-    @Transactional
-    public ResponseEntity<?> startSession(@RequestBody StartSessionRequest req, Authentication auth) {
-        String cafeId = getCurrentCafeId(auth);
-        User operator = userRepository.findById(auth.getName()).orElseThrow();
+    @PostMapping
+    public ResponseEntity<?> startSession(@RequestBody Map<String, Object> payload, Authentication auth) {
+        String cafeId = getCafeId(auth);
+        String resourceId = (String) payload.get("resource_id");
 
-        // 1. Verify Resource Exists
-        Resource resource = resourceRepository.findByIdAndCafeId(req.getResourceId(), cafeId)
-                .orElseThrow(() -> new RuntimeException("Resource not found"));
+        Resource resource = resourceRepository.findById(resourceId).orElse(null);
+        if (resource == null || !resource.getCafeId().equals(cafeId)) {
+            return ResponseEntity.badRequest().body("Resource not found");
+        }
 
-        // (In a full production app, you'd add a query here to ensure the resource isn't already "active")
+        // --- INSIDE startSession() ---
 
-        // 2. Build the Game Session (The PC time)
+        CustomerSession session = new CustomerSession();
+        session.setCafeId(cafeId);
+        session.setCustomerName((String) payload.get("customer_name"));
+        session.setOperatorName(userRepository.findByEmail(auth.getName()).get().getName());
+        session.setCreatedAt(LocalDateTime.now());
+        session.setStatus("active");
+
         GameSession game = new GameSession();
         game.setResourceId(resource.getId());
         game.setResourceName(resource.getName());
         game.setGameTypeId(resource.getGameTypeId());
         game.setRateCardId(resource.getRateCardId());
-        game.setStartTime(req.getStartTime() != null ? req.getStartTime() : Instant.now());
 
-        // 3. Build the Parent Customer Session (The Bill)
-        CustomerSession session = new CustomerSession();
-        session.setCafeId(cafeId);
-        session.setCustomerName(req.getCustomerName());
-        session.setCustomerPhone(req.getCustomerPhone());
-        session.setOperatorId(operator.getId());
-        session.setOperatorName(operator.getName());
-
-        // Link them together for MySQL JPA
-        game.setCustomerSession(session);
-        session.getGames().add(game);
-
-        // Save parent (JPA automatically saves the child GameSession too!)
-        CustomerSession savedSession = sessionRepository.save(session);
-        return ResponseEntity.ok(savedSession);
-    }
-
-    // --- 3. ADD AN ITEM (SNACK/DRINK) TO A GAME ---
-    @PostMapping("/{sid}/games/{gid}/items")
-    @Transactional
-    public ResponseEntity<?> addItem(
-            @PathVariable String sid,
-            @PathVariable String gid,
-            @RequestBody AddItemRequest req,
-            Authentication auth) {
-
-        String cafeId = getCurrentCafeId(auth);
-
-        // 1. Fetch the master session
-        CustomerSession session = sessionRepository.findById(sid)
-                .orElseThrow(() -> new RuntimeException("Session not found"));
-
-        // Ensure security: Does this session belong to this cafe?
-        if (!session.getCafeId().equals(cafeId)) return ResponseEntity.status(403).build();
-
-        // 2. Find the specific game inside the session
-        GameSession targetGame = session.getGames().stream()
-                .filter(g -> g.getId().equals(gid))
-                .findFirst()
-                .orElseThrow(() -> new RuntimeException("Game not found"));
-
-        // 3. Handle Inventory Logic
-        String itemName;
-        Double unitPrice;
-
-        if ("inventory".equals(req.getType())) {
-            InventoryItem item = inventoryRepository.findByIdAndCafeId(req.getRefId(), cafeId)
-                    .orElseThrow(() -> new RuntimeException("Inventory item not found"));
-
-            itemName = item.getName();
-            unitPrice = item.getPrice();
-
-            // Deduct stock in the database
-            item.setStock(item.getStock() - req.getQty());
-            inventoryRepository.save(item);
+        if (payload.containsKey("start_time") && payload.get("start_time") != null) {
+            String st = (String) payload.get("start_time");
+            // Parse React's UTC string and securely convert it to Local IST time!
+            game.setStartTime(Instant.parse(st).atZone(java.time.ZoneId.systemDefault()).toLocalDateTime());
         } else {
-            throw new RuntimeException("Accessory logic goes here"); // Skipped for brevity
+            game.setStartTime(LocalDateTime.now());
         }
 
-        // 4. Create the Item Record
-        GameSessionItem sessionItem = new GameSessionItem();
-        sessionItem.setGameSession(targetGame); // Link to parent game
-        sessionItem.setType(req.getType());
-        sessionItem.setRefId(req.getRefId());
-        sessionItem.setName(itemName);
-        sessionItem.setUnitPrice(unitPrice);
-        sessionItem.setQty(req.getQty());
-        sessionItem.setTotal(unitPrice * req.getQty());
+        game.setPlayerCount(payload.containsKey("player_count") ? (Integer) payload.get("player_count") : 1);
+        game.setStatus("active");
 
-        // Add item to game and save the master session (Cascades down)
-        targetGame.getItems().add(sessionItem);
-        CustomerSession updatedSession = sessionRepository.save(session);
-
-        return ResponseEntity.ok(updatedSession);
+        session.addGame(game);
+        return ResponseEntity.ok(sessionRepository.save(session));
     }
 
-    // --- 4. CHECKOUT (CLOSE SESSION) ---
-    @PostMapping("/{sid}/checkout")
-    @Transactional
-    public ResponseEntity<?> checkout(@PathVariable String sid, Authentication auth) {
-        CustomerSession session = sessionRepository.findById(sid)
-                .orElseThrow(() -> new RuntimeException("Session not found"));
-
-        if ("billed".equals(session.getStatus())) {
-            return ResponseEntity.badRequest().body("Session already billed");
+    @GetMapping("/{sid}/bill")
+    public ResponseEntity<?> previewBill(@PathVariable String sid, Authentication auth) {
+        CustomerSession session = sessionRepository.findById(sid).orElse(null);
+        if (session == null || !session.getCafeId().equals(getCafeId(auth))) {
+            return ResponseEntity.notFound().build();
         }
 
-        // Auto-close any active games
-        Instant now = Instant.now();
-        for (GameSession game : session.getGames()) {
-            if ("active".equals(game.getStatus())) {
-                game.setStatus("soft_closed");
-                game.setEndTime(now);
+        Map<String, Object> bill = billingService.computeSessionBill(session);
+        return ResponseEntity.ok(bill);
+    }
+
+    // --- CHECKOUT ---
+    @PostMapping("/{sid}/checkout")
+    public ResponseEntity<?> checkout(@PathVariable String sid, @RequestBody CheckoutRequest req, Authentication auth) {
+        CustomerSession session = sessionRepository.findById(sid).orElse(null);
+        if (session == null || !session.getCafeId().equals(getCafeId(auth))) {
+            return ResponseEntity.notFound().build();
+        }
+
+        LocalDateTime now = LocalDateTime.now();
+
+        for (GameSession g : session.getGames()) {
+            if ("active".equals(g.getStatus())) {
+                g.setStatus("soft_closed");
+                g.setEndTime(now);
             }
         }
 
-        // (You would call your BillingService here to calculate the final total)
-        // billingService.computeSessionBill(session);
+        // Let Spring do the heavy lifting! No ObjectMapper needed.
+        session.setAdjustment(req.getAdjustment() != null ? req.getAdjustment() : 0.0);
+
+        Map<String, Object> bill = billingService.computeSessionBill(session);
+        double grandTotal = (Double) bill.get("grand_total");
 
         session.setStatus("billed");
         session.setBilledAt(now);
-        // session.setBillTotal(calculatedTotal);
+        session.setBillTotal(grandTotal);
 
+        // Simply set the payments directly from the perfectly mapped request object
+        if (req.getPayments() != null) {
+            session.setPayments(req.getPayments());
+        }
+
+        return ResponseEntity.ok(sessionRepository.save(session));
+    }
+
+    // --- GET SINGLE SESSION ---
+    @GetMapping("/{sid}")
+    public ResponseEntity<?> getSession(@PathVariable String sid, Authentication auth) {
+        CustomerSession session = sessionRepository.findById(sid).orElse(null);
+
+        // Ensure the session exists and belongs to this user's cafe
+        if (session == null || !session.getCafeId().equals(getCafeId(auth))) {
+            return ResponseEntity.notFound().build();
+        }
+
+        return ResponseEntity.ok(session);
+    }
+
+    // --- ADD ANOTHER GAME TO EXISTING SESSION ---
+    @PostMapping("/{sid}/games")
+    public ResponseEntity<?> addGameToSession(@PathVariable String sid, @RequestBody Map<String, Object> payload, Authentication auth) {
+        String cafeId = getCafeId(auth);
+        CustomerSession session = sessionRepository.findById(sid).orElse(null);
+
+        if (session == null || !session.getCafeId().equals(cafeId)) {
+            return ResponseEntity.notFound().build();
+        }
+
+        if (!"active".equals(session.getStatus())) {
+            return ResponseEntity.badRequest().body("Session is not active");
+        }
+
+        String resourceId = (String) payload.get("resource_id");
+        Resource resource = resourceRepository.findById(resourceId).orElse(null);
+        if (resource == null || !resource.getCafeId().equals(cafeId)) {
+            return ResponseEntity.badRequest().body("Resource not found");
+        }
+
+        GameSession game = new GameSession();
+        game.setResourceId(resource.getId());
+        game.setResourceName(resource.getName());
+        game.setGameTypeId(resource.getGameTypeId());
+        game.setRateCardId(resource.getRateCardId());
+
+        // Parse React's UTC string and securely convert it to Local IST time!
+        if (payload.containsKey("start_time") && payload.get("start_time") != null) {
+            String st = (String) payload.get("start_time");
+            game.setStartTime(java.time.Instant.parse(st).atZone(java.time.ZoneId.systemDefault()).toLocalDateTime());
+        } else {
+            game.setStartTime(LocalDateTime.now());
+        }
+
+        game.setPlayerCount(payload.containsKey("player_count") ? (Integer) payload.get("player_count") : 1);
+        game.setStatus("active");
+
+        session.addGame(game); // Hibernate automatically saves this to the database!
+        return ResponseEntity.ok(sessionRepository.save(session));
+    }
+
+    // --- END A SPECIFIC GAME (Keep session open) ---
+    @PostMapping("/{sid}/games/{gid}/end")
+    public ResponseEntity<?> endGame(@PathVariable String sid, @PathVariable String gid, Authentication auth) {
+        CustomerSession session = sessionRepository.findById(sid).orElse(null);
+        if (session == null || !session.getCafeId().equals(getCafeId(auth))) {
+            return ResponseEntity.notFound().build();
+        }
+
+        for (GameSession g : session.getGames()) {
+            if (g.getId().equals(gid) && "active".equals(g.getStatus())) {
+                g.setStatus("soft_closed");
+                g.setEndTime(LocalDateTime.now());
+                break;
+            }
+        }
+        return ResponseEntity.ok(sessionRepository.save(session));
+    }
+
+    // --- FORCE CANCEL SESSION (Admin override, no bill) ---
+    @PostMapping("/{sid}/cancel")
+    public ResponseEntity<?> cancelSession(@PathVariable String sid, Authentication auth) {
+        CustomerSession session = sessionRepository.findById(sid).orElse(null);
+        if (session == null || !session.getCafeId().equals(getCafeId(auth))) {
+            return ResponseEntity.notFound().build();
+        }
+
+        LocalDateTime now = LocalDateTime.now();
+        for (GameSession g : session.getGames()) {
+            if ("active".equals(g.getStatus())) {
+                g.setStatus("cancelled");
+                g.setEndTime(now);
+            }
+        }
+        session.setStatus("cancelled");
+        session.setBilledAt(now);
         return ResponseEntity.ok(sessionRepository.save(session));
     }
 }

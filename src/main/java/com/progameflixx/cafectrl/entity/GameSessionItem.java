@@ -1,27 +1,44 @@
 package com.progameflixx.cafectrl.entity;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.persistence.*;
 import lombok.Data;
-import java.time.Instant;
-import java.util.UUID;
+
+import java.time.LocalDateTime;
 
 @Data
 @Entity
 @Table(name = "game_session_items")
 public class GameSessionItem {
-    @Id
-    private String id = UUID.randomUUID().toString();
 
-    // The back-reference linking it to the parent GameSession
+    @Id
+    @GeneratedValue(strategy = GenerationType.UUID)
+    private String id;
+
+    // THE LINK BACK TO THE GAME (Hidden from JSON to prevent infinite loops)
+    @JsonIgnore
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "game_session_id")
     private GameSession gameSession;
 
-    private String type;
+    private String type; // "inventory" | "accessory"
+
+    @Column(name = "ref_id")
+    @JsonProperty("ref_id")
     private String refId;
+
     private String name;
+
+    @Column(name = "unit_price")
+    @JsonProperty("unit_price")
     private Double unitPrice;
+
     private Integer qty = 1;
     private Double total;
-    private Instant addedAt = Instant.now();
+
+    @Column(name = "added_at")
+    @JsonProperty("added_at")
+    private LocalDateTime addedAt;
+
 }

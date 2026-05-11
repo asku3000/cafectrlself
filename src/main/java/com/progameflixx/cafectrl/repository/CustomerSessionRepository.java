@@ -7,6 +7,7 @@ import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
 import java.time.Instant;
+import java.time.LocalDateTime;
 import java.util.List;
 
 @Repository
@@ -28,4 +29,7 @@ public interface CustomerSessionRepository extends JpaRepository<CustomerSession
 
     @Query("SELECT SUM(s.billTotal) FROM CustomerSession s WHERE s.status = 'billed'")
     Double sumAllRevenue();
+
+    List<CustomerSession> findByCafeIdAndStatusAndBilledAtBetween(
+            String cafeId, String status, LocalDateTime start, LocalDateTime end);
 }

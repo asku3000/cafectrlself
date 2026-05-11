@@ -1,5 +1,6 @@
 package com.progameflixx.cafectrl.entity;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.persistence.*;
 import lombok.Data;
 import java.time.Instant;
@@ -10,18 +11,17 @@ import java.util.UUID;
 @Table(name = "inventory")
 public class InventoryItem {
     @Id
-    private String id = UUID.randomUUID().toString();
+    @GeneratedValue(strategy = GenerationType.UUID)
+    private String id;
 
+    @Column(name = "cafe_id")
+    @JsonProperty("cafe_id")
     private String cafeId;
 
     private String name;
-
-    // snack | drink | other
-    private String category = "snack";
-
+    private String category; // "snack" | "drink" | "other"
     private Double price;
-
-    private Integer stock = 0;
+    private Integer stock;
 
     private Instant createdAt = Instant.now();
 }

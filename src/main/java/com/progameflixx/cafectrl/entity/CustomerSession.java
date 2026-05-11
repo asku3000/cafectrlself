@@ -1,45 +1,73 @@
 package com.progameflixx.cafectrl.entity;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.persistence.*;
 import lombok.Data;
-import java.time.Instant;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
+
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.UUID;
 
 @Data
 @Entity
 @Table(name = "customer_sessions")
 public class CustomerSession {
-    @Id
-    private String id = UUID.randomUUID().toString();
 
+    @Id
+    @GeneratedValue(strategy = GenerationType.UUID)
+    private String id;
+
+    @Column(name = "cafe_id")
+    @JsonProperty("cafe_id")
     private String cafeId;
+
+    @Column(name = "customer_name")
+    @JsonProperty("customer_name")
     private String customerName;
+
+    @Column(name = "customer_phone")
+    @JsonProperty("customer_phone")
     private String customerPhone;
 
-    // Links to the GameSession table
-    @OneToMany(cascade = CascadeType.ALL, orphanRemoval = true, mappedBy = "customerSession")
+    // THE LINK TO GAMES
+    // CascadeType.ALL means if you save the CustomerSession, it saves the Games automatically!
+    @OneToMany(mappedBy = "customerSession", cascade = CascadeType.ALL, orphanRemoval = true)
     private List<GameSession> games = new ArrayList<>();
 
-    private String status = "active";
+    private String status = "active"; // "active" | "billed"
+
+    @Column(name = "bill_total")
+    @JsonProperty("bill_total")
     private Double billTotal = 0.0;
+
     private Double adjustment = 0.0;
 
-    // Links to a sub-table for split payments
-    @ElementCollection
-    @CollectionTable(name = "session_payments", joinColumns = @JoinColumn(name = "session_id"))
+    // Payments mapped cleanly as JSON using your new PaymentSplit class
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(columnDefinition = "json")
     private List<PaymentSplit> payments = new ArrayList<>();
 
+    @Column(name = "operator_id")
+    @JsonProperty("operator_id")
     private String operatorId;
-    private String operatorName;
-    private Instant createdAt = Instant.now();
-    private Instant billedAt;
 
-    @Data
-    @Embeddable
-    public static class PaymentSplit {
-        private String mode; // cash | upi | card
-        private Double amount;
+    @Column(name = "operator_name")
+    @JsonProperty("operator_name")
+    private String operatorName;
+
+    @Column(name = "created_at")
+    @JsonProperty("created_at")
+    private LocalDateTime createdAt;
+
+    @Column(name = "billed_at")
+    @JsonProperty("billed_at")
+    private LocalDateTime billedAt;
+
+    // Helper method to keep JPA synchronization perfect
+    public void addGame(GameSession game) {
+        games.add(game);
+        game.setCustomerSession(this);
     }
 }
