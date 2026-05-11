@@ -5,10 +5,9 @@ package com.progameflixx.cafectrl.controller;
 import com.progameflixx.cafectrl.dto.CheckoutRequest;
 import com.progameflixx.cafectrl.entity.CustomerSession;
 import com.progameflixx.cafectrl.entity.GameSession;
+import com.progameflixx.cafectrl.entity.GameSessionItem;
 import com.progameflixx.cafectrl.entity.Resource;
-import com.progameflixx.cafectrl.repository.CustomerSessionRepository;
-import com.progameflixx.cafectrl.repository.ResourceRepository;
-import com.progameflixx.cafectrl.repository.UserRepository;
+import com.progameflixx.cafectrl.repository.*;
 import com.progameflixx.cafectrl.service.BillingService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
@@ -39,6 +38,15 @@ public class SessionController {
 
     @Autowired
     private BillingService billingService;
+
+    @Autowired
+    private InventoryRepository inventoryRepository;
+
+    @Autowired
+    private AccessoryRepository accessoryRepository;
+
+    @Autowired
+    private com.progameflixx.cafectrl.service.AuditService auditService;
 
     private String getCafeId(Authentication auth) {
         return userRepository.findByEmail(auth.getName()).orElseThrow().getCafeId();
@@ -86,7 +94,13 @@ public class SessionController {
         game.setStatus("active");
 
         session.addGame(game);
-        return ResponseEntity.ok(sessionRepository.save(session));
+        CustomerSession saved = sessionRepository.save(session);
+        // RECORD AUDIT
+        auditService.log(auth, "SESSION_START", saved.getId(), Map.of(
+                "customer", saved.getCustomerName(),
+                "resource", game.getResourceName()
+        ));
+        return ResponseEntity.ok(saved);
     }
 
     @GetMapping("/{sid}/bill")
@@ -131,8 +145,14 @@ public class SessionController {
         if (req.getPayments() != null) {
             session.setPayments(req.getPayments());
         }
-
-        return ResponseEntity.ok(sessionRepository.save(session));
+        CustomerSession saved = sessionRepository.save(session);
+        // RECORD AUDIT
+        auditService.log(auth, "SESSION_CHECKOUT", saved.getId(), Map.of(
+                "customer", saved.getCustomerName(),
+                "total", saved.getBillTotal(),
+                "payments", saved.getPayments()
+        ));
+        return ResponseEntity.ok(saved);
     }
 
     // --- GET SINGLE SESSION ---
@@ -224,6 +244,94 @@ public class SessionController {
         }
         session.setStatus("cancelled");
         session.setBilledAt(now);
+        return ResponseEntity.ok(sessionRepository.save(session));
+    }
+
+    // --- ADD SNACK / ACCESSORY TO GAME ---
+    @PostMapping("/{sid}/games/{gid}/items")
+    public ResponseEntity<?> addItem(@PathVariable String sid, @PathVariable String gid, @RequestBody Map<String, Object> req, Authentication auth) {
+        String cafeId = getCafeId(auth);
+        CustomerSession session = sessionRepository.findById(sid).orElse(null);
+
+        if (session == null || !session.getCafeId().equals(cafeId)) {
+            return ResponseEntity.notFound().build();
+        }
+
+        // 1. Find the specific game
+        GameSession targetGame = null;
+        for (GameSession g : session.getGames()) {
+            if (g.getId().equals(gid)) {
+                targetGame = g;
+                break;
+            }
+        }
+        if (targetGame == null) return ResponseEntity.notFound().build();
+
+        // 2. Get item details from the request
+        String type = (String) req.get("type"); // "inventory" or "accessory"
+        String refId = (String) req.get("ref_id");
+        int qty = req.containsKey("qty") ? Integer.parseInt(req.get("qty").toString()) : 1;
+
+        String itemName = "";
+        double unitPrice = 0.0;
+
+        // 3. Look up the item price and decrement stock if it's inventory
+        if ("inventory".equals(type)) {
+            com.progameflixx.cafectrl.entity.InventoryItem item = inventoryRepository.findById(refId).orElse(null);
+            if (item == null || !item.getCafeId().equals(cafeId)) return ResponseEntity.badRequest().body("Inventory item not found");
+
+            itemName = item.getName();
+            unitPrice = item.getPrice();
+
+            // Decrement stock
+            if (item.getStock() != null) {
+                item.setStock(item.getStock() - qty);
+                inventoryRepository.save(item);
+            }
+        } else if ("accessory".equals(type)) {
+            com.progameflixx.cafectrl.entity.Accessory acc = accessoryRepository.findById(refId).orElse(null);
+            if (acc == null || !acc.getCafeId().equals(cafeId)) return ResponseEntity.badRequest().body("Accessory not found");
+
+            itemName = acc.getName();
+            unitPrice = acc.getPrice();
+        } else {
+            return ResponseEntity.badRequest().body("Invalid item type");
+        }
+
+        // 4. Create the line item
+        GameSessionItem sessionItem = new GameSessionItem();
+        sessionItem.setType(type);
+        sessionItem.setRefId(refId);
+        sessionItem.setName(itemName);
+        sessionItem.setUnitPrice(unitPrice);
+        sessionItem.setQty(qty);
+        sessionItem.setTotal(Math.round(unitPrice * qty * 100.0) / 100.0);
+        sessionItem.setAddedAt(LocalDateTime.now());
+
+        // Helper method (Make sure GameSession.java has this, or just use .add)
+        sessionItem.setGameSession(targetGame);
+        targetGame.getItems().add(sessionItem);
+
+        return ResponseEntity.ok(sessionRepository.save(session));
+    }
+
+    // --- REMOVE SNACK / ACCESSORY ---
+    @DeleteMapping("/{sid}/games/{gid}/items/{itemId}")
+    public ResponseEntity<?> removeItem(@PathVariable String sid, @PathVariable String gid, @PathVariable String itemId, Authentication auth) {
+        CustomerSession session = sessionRepository.findById(sid).orElse(null);
+
+        if (session == null || !session.getCafeId().equals(getCafeId(auth))) {
+            return ResponseEntity.notFound().build();
+        }
+
+        for (GameSession g : session.getGames()) {
+            if (g.getId().equals(gid)) {
+                // Safely remove the item from the list
+                g.getItems().removeIf(item -> item.getId().equals(itemId));
+                break;
+            }
+        }
+
         return ResponseEntity.ok(sessionRepository.save(session));
     }
 }

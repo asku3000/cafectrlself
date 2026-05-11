@@ -1,13 +1,19 @@
 package com.progameflixx.cafectrl.entity;
 
+import com.fasterxml.jackson.annotation.JsonBackReference;
 import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonManagedReference;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.persistence.*;
 import lombok.Data;
+import lombok.EqualsAndHashCode;
+import lombok.ToString;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 @Data
 @Entity
@@ -19,14 +25,16 @@ public class GameSession {
     private String id;
 
     // THE LINK BACK TO THE CUSTOMER SESSION (Hidden from JSON)
-    @JsonIgnore
+    @JsonBackReference
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "customer_session_id")
+    @ToString.Exclude
+    @EqualsAndHashCode.Exclude
     private CustomerSession customerSession;
 
-    // THE LINK FORWARD TO ITEMS
-    @OneToMany(mappedBy = "gameSession", cascade = CascadeType.ALL, orphanRemoval = true)
-    private List<GameSessionItem> items = new ArrayList<>();
+    @JsonManagedReference
+    @OneToMany(mappedBy = "gameSession", cascade = CascadeType.ALL, fetch = FetchType.LAZY)
+    private Set<GameSessionItem> items = new LinkedHashSet<>();
 
     @Column(name = "resource_id")
     @JsonProperty("resource_id")

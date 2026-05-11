@@ -1,14 +1,19 @@
 package com.progameflixx.cafectrl.entity;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonManagedReference;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.persistence.*;
 import lombok.Data;
+import lombok.ToString;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 @Data
 @Entity
@@ -31,10 +36,17 @@ public class CustomerSession {
     @JsonProperty("customer_phone")
     private String customerPhone;
 
-    // THE LINK TO GAMES
-    // CascadeType.ALL means if you save the CustomerSession, it saves the Games automatically!
-    @OneToMany(mappedBy = "customerSession", cascade = CascadeType.ALL, orphanRemoval = true)
-    private List<GameSession> games = new ArrayList<>();
+    @JsonManagedReference
+    @OneToMany(mappedBy = "customerSession", cascade = CascadeType.ALL, fetch = FetchType.LAZY)
+    private Set<GameSession> games = new LinkedHashSet<>();
+
+    // 3. Update the Setter (This is where your error likely is!)
+    // Change List to Set
+    // 2. Update the Getter
+    // 1. Change the field type to Set
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "payments", columnDefinition = "json")
+    private List<PaymentSplit> payments = new java.util.ArrayList<>();
 
     private String status = "active"; // "active" | "billed"
 
@@ -44,10 +56,10 @@ public class CustomerSession {
 
     private Double adjustment = 0.0;
 
-    // Payments mapped cleanly as JSON using your new PaymentSplit class
+/*    // Payments mapped cleanly as JSON using your new PaymentSplit class
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(columnDefinition = "json")
-    private List<PaymentSplit> payments = new ArrayList<>();
+    private List<PaymentSplit> payments = new ArrayList<>();*/
 
     @Column(name = "operator_id")
     @JsonProperty("operator_id")

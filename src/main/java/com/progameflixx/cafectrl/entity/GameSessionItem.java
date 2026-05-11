@@ -1,9 +1,12 @@
 package com.progameflixx.cafectrl.entity;
 
+import com.fasterxml.jackson.annotation.JsonBackReference;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.persistence.*;
 import lombok.Data;
+import lombok.EqualsAndHashCode;
+import lombok.ToString;
 
 import java.time.LocalDateTime;
 
@@ -16,10 +19,11 @@ public class GameSessionItem {
     @GeneratedValue(strategy = GenerationType.UUID)
     private String id;
 
-    // THE LINK BACK TO THE GAME (Hidden from JSON to prevent infinite loops)
-    @JsonIgnore
+    @JsonBackReference
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "game_session_id")
+    @ToString.Exclude
+    @EqualsAndHashCode.Exclude
     private GameSession gameSession;
 
     private String type; // "inventory" | "accessory"

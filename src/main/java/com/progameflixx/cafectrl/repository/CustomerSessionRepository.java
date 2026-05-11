@@ -32,4 +32,18 @@ public interface CustomerSessionRepository extends JpaRepository<CustomerSession
 
     List<CustomerSession> findByCafeIdAndStatusAndBilledAtBetween(
             String cafeId, String status, LocalDateTime start, LocalDateTime end);
+
+    long countByCafeIdAndStatus(String cafeId, String status);
+
+    @Query("SELECT DISTINCT s FROM CustomerSession s " +
+            "LEFT JOIN FETCH s.games g " +
+            "LEFT JOIN FETCH g.items i " +
+            "WHERE s.cafeId = :cafeId AND s.status = :status " +
+            "AND s.billedAt BETWEEN :start AND :end")
+    List<CustomerSession> findMonthlyReportData(
+            @Param("cafeId") String cafeId,
+            @Param("status") String status,
+            @Param("start") LocalDateTime start,
+            @Param("end") LocalDateTime end
+    );
 }
