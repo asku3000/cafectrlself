@@ -5,6 +5,7 @@ import com.progameflixx.cafectrl.entity.GameSession;
 import com.progameflixx.cafectrl.entity.GameSessionItem;
 import com.progameflixx.cafectrl.entity.PaymentSplit;
 import com.progameflixx.cafectrl.repository.CustomerSessionRepository;
+import com.progameflixx.cafectrl.repository.GameTypeRepository;
 import com.progameflixx.cafectrl.repository.UserRepository;
 import com.progameflixx.cafectrl.service.BillingService;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -21,6 +22,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 @CrossOrigin(origins = {"http://localhost:3000", "http://localhost:5173"}, allowCredentials = "true")
 @RestController
@@ -37,6 +39,9 @@ public class ReportController {
     @Autowired
     private BillingService billingService;
 
+    @Autowired
+    private GameTypeRepository gameTypeRepository;
+
     private String getCafeId(Authentication auth) {
         return userRepository.findByEmail(auth.getName()).orElseThrow().getCafeId();
     }
@@ -51,41 +56,52 @@ public class ReportController {
         LocalDateTime start = date.atStartOfDay();
         LocalDateTime end = date.atTime(LocalTime.MAX);
 
-        // Fetch sessions with games and items joined
+        // 1. Fetch sessions with FETCH JOIN for performance and to avoid LazyLoading errors
         List<CustomerSession> sessions = sessionRepository.findMonthlyReportData(
                 cafeId, "billed", start, end);
 
+        // 2. Pre-fetch Game Type Names to ensure the Pie Chart isn't just "General"
+        Map<String, String> gameTypeNames = gameTypeRepository.findAll().stream()
+                .collect(Collectors.toMap(gt -> gt.getId(), gt -> gt.getName(), (a, b) -> a));
+
         double totalRevenue = 0.0;
         Map<String, Double> byMode = new HashMap<>();
+        Map<String, Double> byGameType = new HashMap<>();
         Map<String, Map<String, Object>> byItem = new HashMap<>();
-
-        // This is the specific list your UI expects
         List<Map<String, Object>> itemsTimeline = new ArrayList<>();
-        // This is for the Games Chart (Revenue over time)
         Map<String, Double> hourlyGames = new HashMap<>();
 
         for (CustomerSession s : sessions) {
             totalRevenue += (s.getBillTotal() != null ? s.getBillTotal() : 0.0);
             String hourKey = s.getBilledAt() != null ? s.getBilledAt().getHour() + ":00" : "00:00";
 
-            // 1. Payment Split
+            // Aggregate Payment Modes
             if (s.getPayments() != null) {
-                for (PaymentSplit p : s.getPayments()) {
+                for (com.progameflixx.cafectrl.entity.PaymentSplit p : s.getPayments()) {
                     String mode = (p.getMode() != null) ? p.getMode().toLowerCase() : "cash";
                     byMode.put(mode, byMode.getOrDefault(mode, 0.0) + (p.getAmount() != null ? p.getAmount() : 0.0));
                 }
             }
 
-            // 2. Process Games & Items
-            double sessionGameRev = (s.getBillTotal() != null ? s.getBillTotal() : 0.0);
+            double sessionGameTotal = 0.0;
+            for (com.progameflixx.cafectrl.entity.GameSession g : s.getGames()) {
 
-            for (GameSession g : s.getGames()) {
-                for (GameSessionItem it : g.getItems()) {
-                    sessionGameRev -= (it.getTotal() != null ? it.getTotal() : 0.0);
+                // Calculate game charge (extracting 'amount' from the Map returned by BillingService)
+                Map<String, Object> chargeResult = billingService.computeGameCharge(g);
+                double gameCharge = 0.0;
+                if (chargeResult != null && chargeResult.get("amount") != null) {
+                    gameCharge = ((Number) chargeResult.get("amount")).doubleValue();
+                }
 
-                    // --- UI FIX: Add individual item to the Timeline Log ---
+                // Update Pie Chart distribution
+                String typeName = gameTypeNames.getOrDefault(g.getGameTypeId(), "General Gaming");
+                byGameType.put(typeName, byGameType.getOrDefault(typeName, 0.0) + gameCharge);
+                sessionGameTotal += gameCharge;
+
+                // Flatten items for the Timeline UI Card
+                for (com.progameflixx.cafectrl.entity.GameSessionItem it : g.getItems()) {
                     Map<String, Object> logEntry = new HashMap<>();
-                    logEntry.put("added_at", it.getAddedAt()); // LocalDateTime for fmtDateTime
+                    logEntry.put("added_at", it.getAddedAt());
                     logEntry.put("name", it.getName());
                     logEntry.put("qty", it.getQty());
                     logEntry.put("type", it.getType());
@@ -94,7 +110,7 @@ public class ReportController {
                     logEntry.put("total", it.getTotal());
                     itemsTimeline.add(logEntry);
 
-                    // Aggregate for the "By Item" summary table
+                    // Aggregation for the 'By Item' summary table
                     Map<String, Object> stats = byItem.computeIfAbsent(it.getName(), k -> {
                         Map<String, Object> m = new HashMap<>();
                         m.put("revenue", 0.0);
@@ -106,41 +122,43 @@ public class ReportController {
                     stats.put("qty", (Integer) stats.get("qty") + (it.getQty() != null ? it.getQty() : 0));
                 }
             }
-            // Track hourly game revenue for the chart
-            hourlyGames.put(hourKey, hourlyGames.getOrDefault(hourKey, 0.0) + sessionGameRev);
+            // Update hourly revenue tracker
+            hourlyGames.put(hourKey, hourlyGames.getOrDefault(hourKey, 0.0) + sessionGameTotal);
         }
 
-        // 3. Sort the Items Timeline (Most recent at the top)
+        // Sort: Latest snacks at the top of the timeline
         itemsTimeline.sort((a, b) -> {
             LocalDateTime t1 = (LocalDateTime) a.get("added_at");
             LocalDateTime t2 = (LocalDateTime) b.get("added_at");
-            return t2.compareTo(t1); // Descending order
+            return (t1 != null && t2 != null) ? t2.compareTo(t1) : 0;
         });
 
-        // 4. Build Final Response
+        // 3. Construct the final response with all keys
         Map<String, Object> resp = new HashMap<>();
         resp.put("date", date.toString());
-        resp.put("total", totalRevenue);
+        resp.put("total", Math.round(totalRevenue * 100.0) / 100.0);
         resp.put("by_mode", byMode);
         resp.put("by_item", byItem);
-        resp.put("items_timeline", itemsTimeline); // Now matches your UI .map()
+        resp.put("by_game_type", byGameType);
+        resp.put("items_timeline", itemsTimeline);
         resp.put("games_timeline", convertToTimeline(hourlyGames));
         resp.put("count", sessions.size());
+
+        // THE FIX: Put the sessions back so the "bills" show up in the UI
         resp.put("sessions", sessions);
 
         return resp;
     }
 
-    // Helper method to turn Map into Sorted List for the UI
+    // Helper method for the hourly chart conversion
     private List<Map<String, Object>> convertToTimeline(Map<String, Double> hourlyData) {
         List<Map<String, Object>> timeline = new ArrayList<>();
         for (Map.Entry<String, Double> entry : hourlyData.entrySet()) {
             Map<String, Object> point = new HashMap<>();
             point.put("time", entry.getKey());
-            point.put("revenue", entry.getValue());
+            point.put("revenue", Math.round(entry.getValue() * 100.0) / 100.0);
             timeline.add(point);
         }
-        // Sort by time (09:00 before 10:00)
         timeline.sort((a, b) -> ((String) a.get("time")).compareTo((String) b.get("time")));
         return timeline;
     }

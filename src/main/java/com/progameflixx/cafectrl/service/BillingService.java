@@ -81,7 +81,7 @@ public class BillingService {
         return result;
     }
 
-    private Map<String, Object> computeGameCharge(RateCard rc, LocalDateTime start, LocalDateTime end, int playerCount) {
+    public Map<String, Object> computeGameCharge(RateCard rc, LocalDateTime start, LocalDateTime end, int playerCount) {
         int interval = (rc != null && rc.getBillingIntervalMinutes() != null) ? rc.getBillingIntervalMinutes() : 30;
         int grace = (rc != null && rc.getGraceMinutes() != null) ? rc.getGraceMinutes() : 0;
 
@@ -130,5 +130,25 @@ public class BillingService {
             }
         }
         return 0.0;
+    }
+
+    public Map<String, Object> computeGameCharge(GameSession g) {
+        if (g == null || g.getStartTime() == null || g.getEndTime() == null) {
+            return Map.of("amount", 0.0);
+        }
+
+        // 1. Fetch the RateCard manually by ID since the Entity doesn't have the relationship mapped
+        RateCard card = rateCardRepository.findById(g.getRateCardId())
+                .orElse(null);
+
+        if (card == null) return Map.of("amount", 0.0);
+
+        // 2. Call your existing 4-parameter logic that returns the Map
+        return computeGameCharge(
+                card,
+                g.getStartTime(),
+                g.getEndTime(),
+                g.getPlayerCount()
+        );
     }
 }
