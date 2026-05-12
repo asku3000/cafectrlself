@@ -81,30 +81,118 @@ public class BillingService {
         return result;
     }
 
-    public Map<String, Object> computeGameCharge(RateCard rc, LocalDateTime start, LocalDateTime end, int playerCount) {
-        int interval = (rc != null && rc.getBillingIntervalMinutes() != null) ? rc.getBillingIntervalMinutes() : 30;
-        int grace = (rc != null && rc.getGraceMinutes() != null) ? rc.getGraceMinutes() : 0;
+    public Map<String, Object> computeGameCharge(RateCard card, LocalDateTime startTime, LocalDateTime endTime, int playerCount) {
+        if (startTime == null || endTime == null || card == null) {
+            return Map.of("amount", 0.0);
+        }
 
-        double totalMinutes = Math.max(0.0, Duration.between(start, end).toMinutes());
-        int billableMinutes = Math.max(0, (int) Math.round(totalMinutes - grace));
+        // 1. Fetch dynamic settings directly from your RateCard entity
+        int graceMinutes = card.getGraceMinutes() != null ? card.getGraceMinutes() : 0;
+        int intervalMinutes = card.getBillingIntervalMinutes() != null ? card.getBillingIntervalMinutes() : 30;
 
-        // Note: For effort level, I'm implementing the extraction of the basic rate per interval.
-        // Full DP logic from python can be injected here if you have complex multi-hour slabs!
-        double ratePerInterval = extractPriceForPlayerCount(rc, start, playerCount);
+        // 2. Calculate billable time
+        long totalMinutes = java.time.Duration.between(startTime, endTime).toMinutes();
+        long effectiveMinutes = totalMinutes - graceMinutes;
 
-        int intervals = billableMinutes > 0 ? (int) Math.ceil((double) billableMinutes / interval) : 0;
-        double totalCharge = intervals * ratePerInterval;
+        if (effectiveMinutes <= 0) {
+            effectiveMinutes = 1; // Minimum charge threshold
+        }
 
-        Map<String, Object> res = new HashMap<>();
-        res.put("minutes", Math.round(totalMinutes * 100.0) / 100.0);
-        res.put("billable_minutes", billableMinutes);
-        res.put("interval_minutes", interval);
-        res.put("player_count", playerCount);
-        res.put("amount", Math.round(totalCharge * 100.0) / 100.0);
-        res.put("rate_per_interval", ratePerInterval);
-        return res;
+        // 3. Format weekday (e.g., "Mon") and convert to lower-case to match your JSON ("mon")
+        String weekday = startTime.getDayOfWeek()
+                .getDisplayName(java.time.format.TextStyle.SHORT, java.util.Locale.ENGLISH)
+                .toLowerCase();
+
+        // 4. Fetch dynamic pricing from your JSON structure
+        double rateInterval = extractPrice(card, weekday, intervalMinutes, playerCount); // e.g., 30m rate
+        double rate60Min = extractPrice(card, weekday, 60, playerCount);                 // e.g., 60m rate
+
+        // Fallbacks to prevent 0.0 bills if someone picks an unconfigured player count
+        if (rateInterval == 0.0 && rate60Min == 0.0) {
+            // Default to 1-player rates if exact match fails
+            rateInterval = extractPrice(card, weekday, intervalMinutes, 1);
+            rate60Min = extractPrice(card, weekday, 60, 1);
+        }
+
+        // 5. Block Grouping Algorithm
+        long totalBlocks = (long) Math.ceil((double) effectiveMinutes / intervalMinutes);
+        long blocksPerHour = 60 / intervalMinutes; // e.g., 60 / 30 = 2 blocks per hour
+
+        long fullHours = totalBlocks / blocksPerHour;
+        long remainderBlocks = totalBlocks % blocksPerHour;
+
+        // 6. Calculate total charge (Player count is inherently handled by the exact JSON rate)
+        double totalCharge = (fullHours * rate60Min) + (remainderBlocks * rateInterval);
+
+        // 7. Prepare the detailed payload for the React UI receipt
+        Map<String, Object> result = new HashMap<>();
+        result.put("amount", totalCharge);
+
+        // Capitalize weekday for the UI display (e.g., "mon" -> "Mon")
+        String displayDay = weekday.substring(0, 1).toUpperCase() + weekday.substring(1);
+        result.put("weekday", displayDay);
+        result.put("billable_minutes", totalMinutes);
+        result.put("player_count", playerCount);
+
+        List<Map<String, Object>> appliedGrouped = new ArrayList<>();
+        if (fullHours > 0) {
+            appliedGrouped.add(Map.of(
+                    "duration", 60,
+                    "count", fullHours,
+                    "price", rate60Min,
+                    "subtotal", fullHours * rate60Min
+            ));
+        }
+        if (remainderBlocks > 0) {
+            appliedGrouped.add(Map.of(
+                    "duration", intervalMinutes,
+                    "count", remainderBlocks,
+                    "price", rateInterval,
+                    "subtotal", remainderBlocks * rateInterval
+            ));
+        }
+        result.put("applied_grouped", appliedGrouped);
+
+        return result;
     }
 
+    // =====================================================================
+    // HELPER: Safely parses your nested RateCard JSON structure
+    // =====================================================================
+    private double extractPrice(RateCard card, String weekday, int durationMinutes, int playerCount) {
+        if (card.getWeekdayPrices() == null) return 0.0;
+
+        // Extract the array for the specific day (e.g., "mon")
+        Object dayRulesObj = card.getWeekdayPrices().get(weekday);
+        if (!(dayRulesObj instanceof List)) return 0.0;
+
+        List<?> dayRules = (List<?>) dayRulesObj;
+
+        // Loop through the durations (30, 60) inside that day
+        for (Object ruleObj : dayRules) {
+            if (!(ruleObj instanceof Map)) continue;
+
+            Map<?, ?> rule = (Map<?, ?>) ruleObj;
+
+            // Check if this rule block matches the target duration (e.g., 30)
+            Object durationObj = rule.get("duration");
+            if (durationObj instanceof Number && ((Number) durationObj).intValue() == durationMinutes) {
+
+                // We found the right duration. Now dive into "prices"
+                Object pricesObj = rule.get("prices");
+                if (pricesObj instanceof Map) {
+                    Map<?, ?> prices = (Map<?, ?>) pricesObj;
+
+                    // Look up the exact player count (the keys in your JSON are strings like "3")
+                    Object priceObj = prices.get(String.valueOf(playerCount));
+                    if (priceObj instanceof Number) {
+                        return ((Number) priceObj).doubleValue();
+                    }
+                }
+            }
+        }
+        return 0.0;
+    }
     private double extractPriceForPlayerCount(RateCard rc, LocalDateTime start, int pc) {
         if (rc == null || rc.getWeekdayPrices() == null) return 0.0;
 

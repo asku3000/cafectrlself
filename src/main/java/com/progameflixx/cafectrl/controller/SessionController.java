@@ -3,12 +3,10 @@ package com.progameflixx.cafectrl.controller;
 // --- ALL REQUIRED IMPORTS ---
 
 import com.progameflixx.cafectrl.dto.CheckoutRequest;
-import com.progameflixx.cafectrl.entity.CustomerSession;
-import com.progameflixx.cafectrl.entity.GameSession;
-import com.progameflixx.cafectrl.entity.GameSessionItem;
-import com.progameflixx.cafectrl.entity.Resource;
+import com.progameflixx.cafectrl.entity.*;
 import com.progameflixx.cafectrl.repository.*;
 import com.progameflixx.cafectrl.service.BillingService;
+import jakarta.transaction.Transactional;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -248,57 +246,61 @@ public class SessionController {
     }
 
     // --- ADD SNACK / ACCESSORY TO GAME ---
+    @org.springframework.transaction.annotation.Transactional
     @PostMapping("/{sid}/games/{gid}/items")
     public ResponseEntity<?> addItem(@PathVariable String sid, @PathVariable String gid, @RequestBody Map<String, Object> req, Authentication auth) {
         String cafeId = getCafeId(auth);
         CustomerSession session = sessionRepository.findById(sid).orElse(null);
 
         if (session == null || !session.getCafeId().equals(cafeId)) {
-            return ResponseEntity.notFound().build();
+            return ResponseEntity.status(404).body(Map.of("message", "Session not found"));
         }
 
-        // 1. Find the specific game
-        GameSession targetGame = null;
-        for (GameSession g : session.getGames()) {
-            if (g.getId().equals(gid)) {
-                targetGame = g;
-                break;
-            }
-        }
-        if (targetGame == null) return ResponseEntity.notFound().build();
+        GameSession targetGame = session.getGames().stream()
+                .filter(g -> g.getId().equals(gid))
+                .findFirst().orElse(null);
 
-        // 2. Get item details from the request
-        String type = (String) req.get("type"); // "inventory" or "accessory"
+        if (targetGame == null) return ResponseEntity.status(404).body(Map.of("message", "Game not found"));
+
+        String type = (String) req.get("type");
         String refId = (String) req.get("ref_id");
         int qty = req.containsKey("qty") ? Integer.parseInt(req.get("qty").toString()) : 1;
 
         String itemName = "";
         double unitPrice = 0.0;
 
-        // 3. Look up the item price and decrement stock if it's inventory
         if ("inventory".equals(type)) {
             com.progameflixx.cafectrl.entity.InventoryItem item = inventoryRepository.findById(refId).orElse(null);
-            if (item == null || !item.getCafeId().equals(cafeId)) return ResponseEntity.badRequest().body("Inventory item not found");
+
+            if (item == null || !item.getCafeId().equals(cafeId)) {
+                return ResponseEntity.status(400).body(Map.of("message", "Inventory item not found"));
+            }
+
+            // --- THE MEANINGFUL ERROR FIX ---
+            if (item.getStock() != null) {
+                if (item.getStock() < qty) {
+                    // We use "message" because many React error formatters look for that key
+                    String errorMsg = "Insufficient stock! " + item.getName() + " has only " + item.getStock() + " units left.";
+                    System.out.println("Validation Failed: " + errorMsg); // Check your terminal/logs!
+                    return ResponseEntity.status(400).body(Map.of("message", errorMsg));
+                }
+
+                item.setStock(item.getStock() - qty);
+                inventoryRepository.save(item);
+            }
 
             itemName = item.getName();
             unitPrice = item.getPrice();
 
-            // Decrement stock
-            if (item.getStock() != null) {
-                item.setStock(item.getStock() - qty);
-                inventoryRepository.save(item);
-            }
         } else if ("accessory".equals(type)) {
             com.progameflixx.cafectrl.entity.Accessory acc = accessoryRepository.findById(refId).orElse(null);
-            if (acc == null || !acc.getCafeId().equals(cafeId)) return ResponseEntity.badRequest().body("Accessory not found");
-
+            if (acc == null || !acc.getCafeId().equals(cafeId)) {
+                return ResponseEntity.status(400).body(Map.of("message", "Accessory not found"));
+            }
             itemName = acc.getName();
             unitPrice = acc.getPrice();
-        } else {
-            return ResponseEntity.badRequest().body("Invalid item type");
         }
 
-        // 4. Create the line item
         GameSessionItem sessionItem = new GameSessionItem();
         sessionItem.setType(type);
         sessionItem.setRefId(refId);
@@ -307,8 +309,6 @@ public class SessionController {
         sessionItem.setQty(qty);
         sessionItem.setTotal(Math.round(unitPrice * qty * 100.0) / 100.0);
         sessionItem.setAddedAt(LocalDateTime.now());
-
-        // Helper method (Make sure GameSession.java has this, or just use .add)
         sessionItem.setGameSession(targetGame);
         targetGame.getItems().add(sessionItem);
 
@@ -317,6 +317,7 @@ public class SessionController {
 
     // --- REMOVE SNACK / ACCESSORY ---
     @DeleteMapping("/{sid}/games/{gid}/items/{itemId}")
+    @Transactional
     public ResponseEntity<?> removeItem(@PathVariable String sid, @PathVariable String gid, @PathVariable String itemId, Authentication auth) {
         CustomerSession session = sessionRepository.findById(sid).orElse(null);
 
@@ -326,8 +327,28 @@ public class SessionController {
 
         for (GameSession g : session.getGames()) {
             if (g.getId().equals(gid)) {
-                // Safely remove the item from the list
-                g.getItems().removeIf(item -> item.getId().equals(itemId));
+
+                // Find the item in the list BEFORE deleting it
+                com.progameflixx.cafectrl.entity.GameSessionItem itemToRemove = g.getItems().stream()
+                        .filter(i -> i.getId().equals(itemId))
+                        .findFirst()
+                        .orElse(null);
+
+                if (itemToRemove != null) {
+
+                    // Refund the stock ONLY if it's an inventory item
+                    if ("inventory".equalsIgnoreCase(itemToRemove.getType())) {
+                        InventoryItem inv = inventoryRepository.findById(itemToRemove.getRefId()).orElse(null);
+                        if (inv != null) {
+                            // Add the quantity back to the fridge!
+                            inv.setStock(inv.getStock() + itemToRemove.getQty());
+                            inventoryRepository.save(inv);
+                        }
+                    }
+
+                    // Now it is safe to remove it from the session
+                    g.getItems().remove(itemToRemove);
+                }
                 break;
             }
         }

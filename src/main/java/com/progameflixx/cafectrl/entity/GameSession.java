@@ -30,9 +30,8 @@ public class GameSession {
     @EqualsAndHashCode.Exclude
     private CustomerSession customerSession;
 
-    // Changed to Set to prevent MultipleBagFetchException
     @JsonManagedReference
-    @OneToMany(mappedBy = "gameSession", cascade = CascadeType.ALL, fetch = FetchType.LAZY)
+    @OneToMany(mappedBy = "gameSession", cascade = CascadeType.ALL, fetch = FetchType.LAZY, orphanRemoval = true)
     private Set<GameSessionItem> items = new LinkedHashSet<>();
 
     @Column(name = "resource_id")
