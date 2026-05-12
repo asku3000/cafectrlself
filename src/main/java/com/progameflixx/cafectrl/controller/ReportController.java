@@ -169,88 +169,88 @@ public class ReportController {
 
         String cafeId = getCafeId(auth);
 
-        // 1. Calculate the exact start and end of the requested month
-        LocalDateTime start = LocalDateTime.of(year, month, 1, 0, 0);
-        LocalDateTime end = start.plusMonths(1).minusNanos(1);
+        // 1. Calculate Start and End of the Month
+        LocalDate startOfMonth = LocalDate.of(year, month, 1);
+        LocalDate endOfMonth = startOfMonth.withDayOfMonth(startOfMonth.lengthOfMonth());
+        LocalDateTime start = startOfMonth.atStartOfDay();
+        LocalDateTime end = endOfMonth.atTime(LocalTime.MAX);
 
-        // 2. Fetch data using the FETCH JOIN method to avoid empty item lists
-        List<CustomerSession> sessions = sessionRepository.findMonthlyReportData(
-                cafeId, "billed", start, end);
+        // 2. Fetch Sessions
+        List<com.progameflixx.cafectrl.entity.CustomerSession> sessions =
+                sessionRepository.findMonthlyReportData(cafeId, "billed", start, end);
+
+        // 3. Pre-fetch Game Type Names (THE FIX FOR THE PIE CHART)
+        Map<String, String> gameTypeNames = gameTypeRepository.findAll().stream()
+                .collect(Collectors.toMap(gt -> gt.getId(), gt -> gt.getName(), (a, b) -> a));
 
         double totalRevenue = 0.0;
         Map<String, Double> byMode = new HashMap<>();
         Map<String, Double> byDay = new HashMap<>();
-        Map<String, Double> byGameType = new HashMap<>();
-        Map<String, Map<String, Object>> byItem = new HashMap<>();
-        Map<String, Double> byItemDay = new HashMap<>();
-        Map<String, Double> byGameDay = new HashMap<>();
 
-        java.time.format.DateTimeFormatter dayFormatter = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd");
+        // Detailed Aggregations for Monthly UI Charts
+        Map<String, Double> byGameType = new HashMap<>(); // For Pie Chart
+        Map<String, Map<String, Object>> byItem = new HashMap<>(); // For Top Items Table/Pie
+        Map<String, Double> byGameDay = new HashMap<>(); // For Stacked Bar Chart
+        Map<String, Double> byItemDay = new HashMap<>(); // For Stacked Bar Chart
 
-        for (CustomerSession s : sessions) {
-            double sessionBill = s.getBillTotal() != null ? s.getBillTotal() : 0.0;
-            totalRevenue += sessionBill;
+        for (com.progameflixx.cafectrl.entity.CustomerSession s : sessions) {
 
-            String dayKey = s.getBilledAt() != null ? s.getBilledAt().format(dayFormatter) : "Unknown Date";
-            byDay.put(dayKey, byDay.getOrDefault(dayKey, 0.0) + sessionBill);
+            double billTotal = s.getBillTotal() != null ? s.getBillTotal() : 0.0;
+            totalRevenue += billTotal;
 
-            // Track Payments Split
+            // "YYYY-MM-DD" grouping key for the daily bar charts
+            String dayKey = s.getBilledAt() != null ? s.getBilledAt().toLocalDate().toString() : startOfMonth.toString();
+            byDay.put(dayKey, byDay.getOrDefault(dayKey, 0.0) + billTotal);
+
+            // Payments Split
             if (s.getPayments() != null) {
                 for (com.progameflixx.cafectrl.entity.PaymentSplit p : s.getPayments()) {
                     String mode = (p.getMode() != null) ? p.getMode().toLowerCase() : "cash";
-                    double amt = (p.getAmount() != null) ? p.getAmount() : 0.0;
-                    byMode.put(mode, byMode.getOrDefault(mode, 0.0) + amt);
+                    byMode.put(mode, byMode.getOrDefault(mode, 0.0) + (p.getAmount() != null ? p.getAmount() : 0.0));
                 }
             }
 
-            // Aggregate Game Charges using BillingService
-            Map<String, Object> billData = billingService.computeSessionBill(s);
-            List<Map<String, Object>> gamesBreakdown = (List<Map<String, Object>>) billData.get("games");
+            double sessionGameTotal = 0.0;
+            double sessionItemTotal = 0.0;
 
-            if (gamesBreakdown != null) {
-                for (Map<String, Object> gData : gamesBreakdown) {
-                    String gtName = gData.get("game_type_name") != null ? (String) gData.get("game_type_name") : "General";
-                    Map<String, Object> charge = (Map<String, Object>) gData.get("charge");
-                    double gameAmt = (charge != null && charge.get("amount") != null) ? (Double) charge.get("amount") : 0.0;
-
-                    byGameType.put(gtName, byGameType.getOrDefault(gtName, 0.0) + gameAmt);
-                    byGameDay.put(dayKey, byGameDay.getOrDefault(dayKey, 0.0) + gameAmt);
-                }
-            }
-
-            // Aggregate Items (Snacks/Drinks/Accessories)
+            // Games & Items Processing
             for (com.progameflixx.cafectrl.entity.GameSession g : s.getGames()) {
-                for (com.progameflixx.cafectrl.entity.GameSessionItem it : g.getItems()) {
-                    String itemName = it.getName() != null ? it.getName() : "Unknown Item";
-                    double itemTotal = it.getTotal() != null ? it.getTotal() : 0.0;
-                    int itemQty = it.getQty() != null ? it.getQty() : 0;
 
-                    // Update 'byItem' for Top Items Table
-                    Map<String, Object> stats = byItem.computeIfAbsent(itemName, k -> {
+                // Get exact game charge via BillingService
+                Map<String, Object> chargeResult = billingService.computeGameCharge(g);
+                double gameCharge = 0.0;
+                if (chargeResult != null && chargeResult.get("amount") != null) {
+                    gameCharge = ((Number) chargeResult.get("amount")).doubleValue();
+                }
+
+                // Apply Name Lookup for Pie Chart slices
+                String typeName = gameTypeNames.getOrDefault(g.getGameTypeId(), "General Gaming");
+                byGameType.put(typeName, byGameType.getOrDefault(typeName, 0.0) + gameCharge);
+                sessionGameTotal += gameCharge;
+
+                for (com.progameflixx.cafectrl.entity.GameSessionItem it : g.getItems()) {
+                    double itemTotal = it.getTotal() != null ? it.getTotal() : 0.0;
+                    sessionItemTotal += itemTotal;
+
+                    // Summary for Top Items table
+                    Map<String, Object> stats = byItem.computeIfAbsent(it.getName(), k -> {
                         Map<String, Object> m = new HashMap<>();
                         m.put("revenue", 0.0);
                         m.put("qty", 0);
+                        m.put("type", it.getType());
                         return m;
                     });
                     stats.put("revenue", (Double) stats.get("revenue") + itemTotal);
-                    stats.put("qty", (Integer) stats.get("qty") + itemQty);
-
-                    // Update 'byItemDay' for Timeline Chart
-                    byItemDay.put(dayKey, byItemDay.getOrDefault(dayKey, 0.0) + itemTotal);
+                    stats.put("qty", (Integer) stats.get("qty") + (it.getQty() != null ? it.getQty() : 0));
                 }
             }
+
+            // Populate Stacked Bar Chart data
+            byGameDay.put(dayKey, byGameDay.getOrDefault(dayKey, 0.0) + sessionGameTotal);
+            byItemDay.put(dayKey, byItemDay.getOrDefault(dayKey, 0.0) + sessionItemTotal);
         }
 
-        // 3. Format Top Items for React mapping
-        List<Map<String, Object>> topItems = new ArrayList<>();
-        for (Map.Entry<String, Map<String, Object>> entry : byItem.entrySet()) {
-            Map<String, Object> itemObj = new HashMap<>(entry.getValue());
-            itemObj.put("name", entry.getKey());
-            topItems.add(itemObj);
-        }
-        topItems.sort((a, b) -> Double.compare((Double) b.get("revenue"), (Double) a.get("revenue")));
-
-        // 4. Final Response Construction
+        // Return the exact JSON structure your Monthly React Tab expects
         Map<String, Object> resp = new HashMap<>();
         resp.put("year", year);
         resp.put("month", month);
@@ -258,11 +258,14 @@ public class ReportController {
         resp.put("count", sessions.size());
         resp.put("by_mode", byMode);
         resp.put("by_day", byDay);
-        resp.put("by_game_type", byGameType);
+        resp.put("by_game_type", byGameType); // Fixes the Pie Chart
         resp.put("by_item", byItem);
-        resp.put("top_items", topItems);
-        resp.put("by_game_day", byGameDay);
-        resp.put("by_item_day", byItemDay);
+        resp.put("by_game_day", byGameDay);   // Fixes Stacked Bar (Games)
+        resp.put("by_item_day", byItemDay);   // Fixes Stacked Bar (Items)
+
+        // Note: We deliberately do NOT return the "sessions" list here because a
+        // whole month of raw session data would make the JSON payload huge and
+        // slow down the browser, and the Monthly UI tab doesn't have a "Bills" table anyway.
 
         return resp;
     }
