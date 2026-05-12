@@ -1,16 +1,13 @@
 package com.progameflixx.cafectrl.entity;
 
-import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonManagedReference;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.persistence.*;
 import lombok.Data;
-import lombok.ToString;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
 import java.time.LocalDateTime;
-import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -76,6 +73,21 @@ public class CustomerSession {
     @Column(name = "billed_at")
     @JsonProperty("billed_at")
     private LocalDateTime billedAt;
+
+    @Transient
+    @JsonProperty("game_charges")
+    private Double gameCharges;
+
+    @Transient
+    @JsonProperty("item_charges")
+    private Double itemCharges;
+
+    @Transient
+    private Double subtotal;
+
+    @Transient
+    @JsonProperty("bill_breakdown")
+    private java.util.Map<String, Object> billBreakdown;
 
     // Helper method to keep JPA synchronization perfect
     public void addGame(GameSession game) {

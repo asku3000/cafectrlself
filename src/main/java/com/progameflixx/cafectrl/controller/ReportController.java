@@ -56,11 +56,9 @@ public class ReportController {
         LocalDateTime start = date.atStartOfDay();
         LocalDateTime end = date.atTime(LocalTime.MAX);
 
-        // 1. Fetch sessions with FETCH JOIN for performance and to avoid LazyLoading errors
-        List<CustomerSession> sessions = sessionRepository.findMonthlyReportData(
-                cafeId, "billed", start, end);
+        List<com.progameflixx.cafectrl.entity.CustomerSession> sessions =
+                sessionRepository.findMonthlyReportData(cafeId, "billed", start, end);
 
-        // 2. Pre-fetch Game Type Names to ensure the Pie Chart isn't just "General"
         Map<String, String> gameTypeNames = gameTypeRepository.findAll().stream()
                 .collect(Collectors.toMap(gt -> gt.getId(), gt -> gt.getName(), (a, b) -> a));
 
@@ -71,11 +69,11 @@ public class ReportController {
         List<Map<String, Object>> itemsTimeline = new ArrayList<>();
         Map<String, Double> hourlyGames = new HashMap<>();
 
-        for (CustomerSession s : sessions) {
+        for (com.progameflixx.cafectrl.entity.CustomerSession s : sessions) {
             totalRevenue += (s.getBillTotal() != null ? s.getBillTotal() : 0.0);
             String hourKey = s.getBilledAt() != null ? s.getBilledAt().getHour() + ":00" : "00:00";
 
-            // Aggregate Payment Modes
+            // 1. Process Payments
             if (s.getPayments() != null) {
                 for (com.progameflixx.cafectrl.entity.PaymentSplit p : s.getPayments()) {
                     String mode = (p.getMode() != null) ? p.getMode().toLowerCase() : "cash";
@@ -83,22 +81,26 @@ public class ReportController {
                 }
             }
 
+            // ---> THE UI FIX: Generate and attach the full Receipt Breakdown <---
+            Map<String, Object> breakdown = billingService.computeSessionBill(s);
+            s.setBillBreakdown(breakdown);
+
+            // 2. Process Games for the Charts & Timeline
             double sessionGameTotal = 0.0;
             for (com.progameflixx.cafectrl.entity.GameSession g : s.getGames()) {
 
-                // Calculate game charge (extracting 'amount' from the Map returned by BillingService)
+                // Get the game charge to feed the Pie Chart
                 Map<String, Object> chargeResult = billingService.computeGameCharge(g);
                 double gameCharge = 0.0;
                 if (chargeResult != null && chargeResult.get("amount") != null) {
                     gameCharge = ((Number) chargeResult.get("amount")).doubleValue();
                 }
 
-                // Update Pie Chart distribution
                 String typeName = gameTypeNames.getOrDefault(g.getGameTypeId(), "General Gaming");
                 byGameType.put(typeName, byGameType.getOrDefault(typeName, 0.0) + gameCharge);
                 sessionGameTotal += gameCharge;
 
-                // Flatten items for the Timeline UI Card
+                // Process Items for the Timeline List
                 for (com.progameflixx.cafectrl.entity.GameSessionItem it : g.getItems()) {
                     Map<String, Object> logEntry = new HashMap<>();
                     logEntry.put("added_at", it.getAddedAt());
@@ -110,7 +112,6 @@ public class ReportController {
                     logEntry.put("total", it.getTotal());
                     itemsTimeline.add(logEntry);
 
-                    // Aggregation for the 'By Item' summary table
                     Map<String, Object> stats = byItem.computeIfAbsent(it.getName(), k -> {
                         Map<String, Object> m = new HashMap<>();
                         m.put("revenue", 0.0);
@@ -122,18 +123,17 @@ public class ReportController {
                     stats.put("qty", (Integer) stats.get("qty") + (it.getQty() != null ? it.getQty() : 0));
                 }
             }
-            // Update hourly revenue tracker
             hourlyGames.put(hourKey, hourlyGames.getOrDefault(hourKey, 0.0) + sessionGameTotal);
         }
 
-        // Sort: Latest snacks at the top of the timeline
+        // 3. Sort Timeline
         itemsTimeline.sort((a, b) -> {
             LocalDateTime t1 = (LocalDateTime) a.get("added_at");
             LocalDateTime t2 = (LocalDateTime) b.get("added_at");
             return (t1 != null && t2 != null) ? t2.compareTo(t1) : 0;
         });
 
-        // 3. Construct the final response with all keys
+        // 4. Return Final JSON
         Map<String, Object> resp = new HashMap<>();
         resp.put("date", date.toString());
         resp.put("total", Math.round(totalRevenue * 100.0) / 100.0);
@@ -143,14 +143,11 @@ public class ReportController {
         resp.put("items_timeline", itemsTimeline);
         resp.put("games_timeline", convertToTimeline(hourlyGames));
         resp.put("count", sessions.size());
-
-        // THE FIX: Put the sessions back so the "bills" show up in the UI
-        resp.put("sessions", sessions);
+        resp.put("sessions", sessions); // React will map over this, and open the `bill_breakdown`!
 
         return resp;
     }
 
-    // Helper method for the hourly chart conversion
     private List<Map<String, Object>> convertToTimeline(Map<String, Double> hourlyData) {
         List<Map<String, Object>> timeline = new ArrayList<>();
         for (Map.Entry<String, Double> entry : hourlyData.entrySet()) {
