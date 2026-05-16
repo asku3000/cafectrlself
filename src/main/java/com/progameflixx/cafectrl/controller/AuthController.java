@@ -4,8 +4,10 @@ import com.progameflixx.cafectrl.config.JwtService;
 import com.progameflixx.cafectrl.dto.LoginRequest;
 import com.progameflixx.cafectrl.dto.SignupRequest;
 import com.progameflixx.cafectrl.entity.Cafe;
+import com.progameflixx.cafectrl.entity.PasswordResetToken;
 import com.progameflixx.cafectrl.entity.User;
 import com.progameflixx.cafectrl.repository.CafeRepository;
+import com.progameflixx.cafectrl.repository.PasswordResetTokenRepository;
 import com.progameflixx.cafectrl.repository.UserRepository;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
@@ -18,6 +20,7 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
@@ -37,6 +40,9 @@ public class AuthController {
 
     @Autowired
     private JwtService jwtService;
+
+    @Autowired
+    private PasswordResetTokenRepository tokenRepository;
 
     private static final Logger logger = LoggerFactory.getLogger(AuthController.class);
 
@@ -146,5 +152,90 @@ public class AuthController {
         }
 
         return ResponseEntity.status(401).body("Unauthorized");
+    }
+
+    // --- 1. FORGOT PASSWORD (Request Recovery Link) ---
+    @PostMapping("/forgot-password")
+    public ResponseEntity<?> forgotPassword(@RequestBody Map<String, String> req, HttpServletRequest request) {
+        String email = req.get("email");
+
+        // Lookup target account entries
+        User user = userRepository.findByEmail(email).orElse(null);
+
+        // STRICT SECURITY GUARD: Only allow password recovery for CAFE_ADMIN role
+        if (user == null || !"CAFE_ADMIN".equalsIgnoreCase(user.getRole())) {
+            // Return a vague message so malicious users can't guess valid admin emails
+            return ResponseEntity.ok(Map.of("message", "If the email matches an Admin account, a verification token has been generated."));
+        }
+
+        // Clean up any previously forgotten tokens for this email to keep DB tidy
+        try {
+            tokenRepository.deleteByEmail(email);
+        } catch (Exception e) {
+            // Safe to catch if no old tokens exist
+        }
+
+        // Generate a secure unique UUID token
+        String token = java.util.UUID.randomUUID().toString();
+
+        PasswordResetToken resetToken = new PasswordResetToken();
+        resetToken.setToken(token);
+        resetToken.setEmail(email);
+        // Token valid for exactly 15 minutes
+        resetToken.setExpiryDate(LocalDateTime.now().plusMinutes(15));
+
+        tokenRepository.save(resetToken);
+
+        // Simulate Email Delivery directly into your local running terminal logs
+        String origin = request.getHeader("Origin");
+
+        // Fallback safeguard if the browser didn't supply an origin header for some reason
+        if (origin == null || origin.isBlank()) {
+            origin = "http://localhost:3000";
+        }
+
+        // ... your token generation logic ...
+
+        // 2. Build the link dynamically using the client's origin
+        String resetLink = origin + "/reset-password?token=" + token;
+        System.out.println("\n====================================================================");
+        System.out.println("⚡ CAFE_CTRL PASSWORD RESET TOOL ⚡");
+        System.out.println("Reset requested for Admin: " + email);
+        System.out.println("Click the link below to set your new credentials:");
+        System.out.println(resetLink);
+        System.out.println("====================================================================\n");
+        Map<String, Object> response = new HashMap<>();
+        response.put("message", "Recovery link generated successfully!, Press F12, Click on link");
+        response.put("devResetLink", resetLink);
+        return ResponseEntity.ok(response);
+    }
+
+    // --- 2. RESET PASSWORD (Commit New Password using Token) ---
+    @Transactional
+    @PostMapping("/reset-password")
+    public ResponseEntity<?> resetPassword(@RequestBody Map<String, String> req) {
+        String token = req.get("token");
+        String newPassword = req.get("newPassword");
+
+        // Locate the security token configuration row
+        PasswordResetToken resetToken = tokenRepository.findByToken(token).orElse(null);
+        if (resetToken == null || resetToken.isExpired()) {
+            return ResponseEntity.badRequest().body(Map.of("message", "The verification token is invalid or has expired."));
+        }
+
+        // Locate matching Admin account
+        User user = userRepository.findByEmail(resetToken.getEmail()).orElse(null);
+        if (user == null || !"CAFE_ADMIN".equalsIgnoreCase(user.getRole())) {
+            return ResponseEntity.badRequest().body(Map.of("message", "Account validation failed."));
+        }
+
+        // Hash and save the incoming plain text password securely
+        user.setPassword(passwordEncoder.encode(newPassword));
+        userRepository.save(user);
+
+        // Immediately burn the token row so it can never be used twice
+        tokenRepository.delete(resetToken);
+
+        return ResponseEntity.ok(Map.of("message", "Password updated successfully! You can now log in."));
     }
 }
