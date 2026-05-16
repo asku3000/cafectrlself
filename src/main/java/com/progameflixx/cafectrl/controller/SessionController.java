@@ -209,7 +209,7 @@ public class SessionController {
 
     // --- END A SPECIFIC GAME (Keep session open) ---
     @PostMapping("/{sid}/games/{gid}/end")
-    public ResponseEntity<?> endGame(@PathVariable String sid, @PathVariable String gid, Authentication auth) {
+    public ResponseEntity<?> endGame(@PathVariable String sid, @PathVariable String gid, @RequestBody Map<String, Object> payload, Authentication auth) {
         CustomerSession session = sessionRepository.findById(sid).orElse(null);
         if (session == null || !session.getCafeId().equals(getCafeId(auth))) {
             return ResponseEntity.notFound().build();
@@ -218,7 +218,12 @@ public class SessionController {
         for (GameSession g : session.getGames()) {
             if (g.getId().equals(gid) && "active".equals(g.getStatus())) {
                 g.setStatus("soft_closed");
-                g.setEndTime(LocalDateTime.now());
+                if (payload.containsKey("end_time") && payload.get("end_time") != null) {
+                    String st = (String) payload.get("end_time");
+                    g.setEndTime(Instant.parse(st).atZone(java.time.ZoneId.systemDefault()).toLocalDateTime());
+                } else {
+                    g.setEndTime(LocalDateTime.now());
+                }
                 break;
             }
         }
