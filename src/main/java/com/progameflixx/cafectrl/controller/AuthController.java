@@ -16,6 +16,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.ResponseCookie;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.Authentication;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
@@ -237,5 +239,37 @@ public class AuthController {
         tokenRepository.delete(resetToken);
 
         return ResponseEntity.ok(Map.of("message", "Password updated successfully! You can now log in."));
+    }
+
+    @PostMapping("/change-password")
+    @PreAuthorize("hasRole('CAFE_ADMIN')")
+    public ResponseEntity<?> changePassword(@RequestBody Map<String, String> req, Authentication auth) {
+        String principalIdentifier = auth.getName();
+        String oldPassword = req.get("current_password");
+        String newPassword = req.get("new_password");
+
+        if (newPassword == null || newPassword.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("message", "New password cannot be empty"));
+        }
+
+        // FIX: Try looking up by UUID first, then fallback to Email
+        User user = userRepository.findById(principalIdentifier)
+                .orElseGet(() -> userRepository.findByEmail(principalIdentifier).orElse(null));
+
+        // Safeguard check if the user genuinely doesn't exist in the DB
+        if (user == null) {
+            return ResponseEntity.status(404).body(Map.of("message", "Logged-in user profile not found."));
+        }
+
+        // Verify the old password matches what's in the DB
+        if (!passwordEncoder.matches(oldPassword, user.getPassword())) {
+            return ResponseEntity.badRequest().body(Map.of("message", "Incorrect current password"));
+        }
+
+        // Hash and save the new password
+        user.setPassword(passwordEncoder.encode(newPassword));
+        userRepository.save(user);
+
+        return ResponseEntity.ok(Map.of("message", "Password changed successfully"));
     }
 }
