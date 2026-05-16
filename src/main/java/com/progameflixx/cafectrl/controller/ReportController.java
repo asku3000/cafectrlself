@@ -27,7 +27,7 @@ import java.util.stream.Collectors;
 @CrossOrigin(origins = {"http://localhost:3000", "http://localhost:5173"}, allowCredentials = "true")
 @RestController
 @RequestMapping("/api/reports")
-@PreAuthorize("hasRole('CAFE_ADMIN')")
+@PreAuthorize("hasAnyRole('CAFE_ADMIN', 'OPERATOR')")
 public class ReportController {
 
     @Autowired

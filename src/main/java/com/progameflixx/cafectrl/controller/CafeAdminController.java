@@ -86,7 +86,7 @@ public class CafeAdminController {
     @PostMapping("/staff")
     public User createOperator(@RequestBody User staffReq, Authentication auth) {
         staffReq.setCafeId(getCafeId(auth));
-        staffReq.setRole("operator");
+        staffReq.setRole("OPERATOR");
         staffReq.setPassword(passwordEncoder.encode(staffReq.getPassword()));
         return userRepository.save(staffReq);
     }
@@ -95,6 +95,42 @@ public class CafeAdminController {
     public ResponseEntity<?> deleteOperator(@PathVariable String uid, Authentication auth) {
         userRepository.deleteById(uid);
         return ResponseEntity.ok().build();
+    }
+
+    @PutMapping("/staff/{id}")
+    @PreAuthorize("hasRole('CAFE_ADMIN')")
+    @org.springframework.transaction.annotation.Transactional
+    public ResponseEntity<?> updateStaff(@PathVariable String id, @RequestBody User req) {
+
+        // 1. Find the existing operator
+        User op = userRepository.findById(id).orElse(null);
+        if (op == null) {
+            return ResponseEntity.status(404).body(Map.of("message", "Operator not found"));
+        }
+
+        // 2. Prevent unique email crashes
+        if (req.getEmail() != null && !req.getEmail().equalsIgnoreCase(op.getEmail())) {
+            boolean emailExists = userRepository.existsByEmailAndIdNot(req.getEmail(), id);
+            if (emailExists) {
+                return ResponseEntity.badRequest().body(Map.of("message", "Email already exists"));
+            }
+            op.setEmail(req.getEmail());
+        }
+
+        op.setName(req.getName());
+
+        // 3. Prevent NullPointerException on password encoding
+        if (req.getPassword() != null && !req.getPassword().isBlank()) {
+            op.setPassword(passwordEncoder.encode(req.getPassword()));
+        }
+
+        // 4. Safe collection handling for permissions
+        if (req.getPermissions() != null) {
+            op.getPermissions().clear();
+            op.getPermissions().addAll(req.getPermissions());
+        }
+
+        return ResponseEntity.ok(userRepository.save(op));
     }
 
     // --- GAME TYPES (PC, PS5, etc.) ---
