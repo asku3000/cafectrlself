@@ -1,11 +1,9 @@
 package com.progameflixx.cafectrl.controller;
 
-import com.progameflixx.cafectrl.entity.CustomerSession;
-import com.progameflixx.cafectrl.entity.GameSession;
-import com.progameflixx.cafectrl.entity.GameSessionItem;
-import com.progameflixx.cafectrl.entity.PaymentSplit;
+import com.progameflixx.cafectrl.entity.*;
 import com.progameflixx.cafectrl.repository.CustomerSessionRepository;
 import com.progameflixx.cafectrl.repository.GameTypeRepository;
+import com.progameflixx.cafectrl.repository.PendingPaymentRepository;
 import com.progameflixx.cafectrl.repository.UserRepository;
 import com.progameflixx.cafectrl.service.BillingService;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -42,6 +40,9 @@ public class ReportController {
     @Autowired
     private GameTypeRepository gameTypeRepository;
 
+    @Autowired
+    private PendingPaymentRepository pendingPaymentRepository;
+
     private String getCafeId(Authentication auth) {
         return userRepository.findByEmail(auth.getName()).orElseThrow().getCafeId();
     }
@@ -59,10 +60,15 @@ public class ReportController {
         List<com.progameflixx.cafectrl.entity.CustomerSession> sessions =
                 sessionRepository.findMonthlyReportData(cafeId, "billed", start, end);
 
+        // NEW: Fetch debts that were cleared today
+        List<com.progameflixx.cafectrl.entity.PendingPayment> clearedToday =
+                pendingPaymentRepository.findByCafeIdAndStatusAndClearedAtBetween(cafeId, "CLEARED", start, end);
+
         Map<String, String> gameTypeNames = gameTypeRepository.findAll().stream()
                 .collect(Collectors.toMap(gt -> gt.getId(), gt -> gt.getName(), (a, b) -> a));
 
-        double totalRevenue = 0.0;
+        // REPLACED: totalRevenue with totalCollected to track true cash-in-hand
+        double totalCollected = 0.0;
         Map<String, Double> byMode = new HashMap<>();
         Map<String, Double> byGameType = new HashMap<>();
         Map<String, Map<String, Object>> byItem = new HashMap<>();
@@ -70,14 +76,21 @@ public class ReportController {
         Map<String, Double> hourlyGames = new HashMap<>();
 
         for (com.progameflixx.cafectrl.entity.CustomerSession s : sessions) {
-            totalRevenue += (s.getBillTotal() != null ? s.getBillTotal() : 0.0);
             String hourKey = s.getBilledAt() != null ? s.getBilledAt().getHour() + ":00" : "00:00";
 
-            // 1. Process Payments
+            // 1. Process Payments (Cash Accounting Logic)
             if (s.getPayments() != null) {
                 for (com.progameflixx.cafectrl.entity.PaymentSplit p : s.getPayments()) {
                     String mode = (p.getMode() != null) ? p.getMode().toLowerCase() : "cash";
-                    byMode.put(mode, byMode.getOrDefault(mode, 0.0) + (p.getAmount() != null ? p.getAmount() : 0.0));
+                    double amt = (p.getAmount() != null) ? p.getAmount() : 0.0;
+
+                    // Track all modes (including pending so it shows in the UI grid)
+                    byMode.put(mode, byMode.getOrDefault(mode, 0.0) + amt);
+
+                    // Add to true collected revenue ONLY if it isn't "pending"
+                    if (!mode.contains("pending")) {
+                        totalCollected += amt;
+                    }
                 }
             }
 
@@ -133,18 +146,46 @@ public class ReportController {
             return (t1 != null && t2 != null) ? t2.compareTo(t1) : 0;
         });
 
+        // NEW: 2.5 Inject Settled Debts into Today's Revenue & Create UI Trail
+        List<Map<String, Object>> recoveredDebts = new ArrayList<>(); // <-- Create the list for the UI
+
+        for (com.progameflixx.cafectrl.entity.PendingPayment p : clearedToday) {
+            double amt = p.getAmount() != null ? p.getAmount() : 0.0;
+            String mode = p.getSettlementMode() != null ? p.getSettlementMode().toLowerCase() : "cash";
+
+            totalCollected += amt;
+            byMode.put(mode, byMode.getOrDefault(mode, 0.0) + amt);
+
+            // Map the details for the React frontend
+            Map<String, Object> debtLog = new HashMap<>();
+            debtLog.put("id", p.getId());
+            debtLog.put("customer_name", p.getCustomerName());
+            debtLog.put("customer_phone", p.getCustomerPhone());
+            debtLog.put("amount", amt);
+            debtLog.put("mode", mode);
+            debtLog.put("cleared_at", p.getClearedAt());
+            debtLog.put("created_at", p.getCreatedAt()); // When the debt originally happened
+
+            recoveredDebts.add(debtLog);
+        }
+        recoveredDebts.sort((a, b) -> {
+            LocalDateTime t1 = (LocalDateTime) a.get("cleared_at");
+            LocalDateTime t2 = (LocalDateTime) b.get("cleared_at");
+            return (t1 != null && t2 != null) ? t2.compareTo(t1) : 0;
+        });
+
         // 4. Return Final JSON
         Map<String, Object> resp = new HashMap<>();
         resp.put("date", date.toString());
-        resp.put("total", Math.round(totalRevenue * 100.0) / 100.0);
+        resp.put("total", Math.round(totalCollected * 100.0) / 100.0); // Now perfectly reflects true cash in drawer
         resp.put("by_mode", byMode);
         resp.put("by_item", byItem);
         resp.put("by_game_type", byGameType);
         resp.put("items_timeline", itemsTimeline);
-        resp.put("games_timeline", convertToTimeline(hourlyGames));
+        resp.put("games_timeline", convertToTimeline(hourlyGames)); // (Assuming you have this helper method below)
         resp.put("count", sessions.size());
-        resp.put("sessions", sessions); // React will map over this, and open the `bill_breakdown`!
-
+        resp.put("sessions", sessions);
+        resp.put("recovered_debts", recoveredDebts);
         return resp;
     }
 
@@ -249,7 +290,9 @@ public class ReportController {
             byGameDay.put(dayKey, byGameDay.getOrDefault(dayKey, 0.0) + sessionGameTotal);
             byItemDay.put(dayKey, byItemDay.getOrDefault(dayKey, 0.0) + sessionItemTotal);
         }
-
+        List<com.progameflixx.cafectrl.entity.PendingPayment> clearedMonthly =
+                pendingPaymentRepository.findByCafeIdAndStatusAndClearedAtBetween(cafeId, "CLEARED", start, end);
+        double monthlyPendingTotalCleared = clearedMonthly.stream().mapToDouble(PendingPayment::getAmount).sum();
         // Return the exact JSON structure your Monthly React Tab expects
         Map<String, Object> resp = new HashMap<>();
         resp.put("year", year);
@@ -262,7 +305,7 @@ public class ReportController {
         resp.put("by_item", byItem);
         resp.put("by_game_day", byGameDay);   // Fixes Stacked Bar (Games)
         resp.put("by_item_day", byItemDay);   // Fixes Stacked Bar (Items)
-
+        resp.put("pending_total_cleared", monthlyPendingTotalCleared);
         // Note: We deliberately do NOT return the "sessions" list here because a
         // whole month of raw session data would make the JSON payload huge and
         // slow down the browser, and the Monthly UI tab doesn't have a "Bills" table anyway.

@@ -44,6 +44,9 @@ public class SessionController {
     private AccessoryRepository accessoryRepository;
 
     @Autowired
+    private PendingPaymentRepository pendingPaymentRepository;
+
+    @Autowired
     private com.progameflixx.cafectrl.service.AuditService auditService;
 
     private String getCafeId(Authentication auth) {
@@ -150,6 +153,19 @@ public class SessionController {
                 "total", saved.getBillTotal(),
                 "payments", saved.getPayments()
         ));
+        for (PaymentSplit p : req.getPayments()) {
+            if ("pending".equalsIgnoreCase(p.getMode())) {
+                PendingPayment debt = new PendingPayment();
+                debt.setSessionId(session.getId());
+                debt.setCafeId(session.getCafeId());
+                debt.setCustomerName(session.getCustomerName());
+                debt.setCustomerPhone(session.getCustomerPhone());
+                debt.setAmount(p.getAmount());
+                debt.setStatus("PENDING");
+                debt.setCreatedAt(LocalDateTime.now());
+                pendingPaymentRepository.save(debt);
+            }
+        }
         return ResponseEntity.ok(saved);
     }
 

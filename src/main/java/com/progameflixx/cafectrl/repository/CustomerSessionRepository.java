@@ -1,6 +1,9 @@
 package com.progameflixx.cafectrl.repository;
 
+import com.progameflixx.cafectrl.dto.CustomerProfileView;
 import com.progameflixx.cafectrl.entity.CustomerSession;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -46,4 +49,17 @@ public interface CustomerSessionRepository extends JpaRepository<CustomerSession
             @Param("start") LocalDateTime start,
             @Param("end") LocalDateTime end
     );
+
+    List<CustomerSession> findByCafeId(String cafeId);
+
+    List<CustomerSession> findByCafeIdAndCustomerNameIgnoreCase(String cafeId, String trim);
+
+    @Query("SELECT LOWER(TRIM(s.customerName)) AS name, " +
+            "TRIM(s.customerPhone) AS phone, " +
+            "COUNT(s.id) AS totalVisits, " +
+            "MAX(s.createdAt) AS lastVisited " +
+            "FROM CustomerSession s " +
+            "WHERE s.cafeId = :cafeId " +
+            "GROUP BY LOWER(TRIM(s.customerName)), TRIM(s.customerPhone)")
+    Page<CustomerProfileView> getGroupedCustomerProfiles(@Param("cafeId") String cafeId, Pageable pageable);
 }
