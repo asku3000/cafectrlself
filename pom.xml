@@ -11,7 +11,7 @@
 	<groupId>com.progameflixx</groupId>
 	<artifactId>CafeCtrl</artifactId>
 	<version>0.0.1-SNAPSHOT</version>
-	<packaging>war</packaging>
+	<packaging>jar</packaging>
 	<name>bookings</name>
 	<description>project for the bookings and entries on the Pro Game Flixx</description>
 	<url/>
