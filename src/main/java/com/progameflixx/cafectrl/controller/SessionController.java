@@ -15,11 +15,10 @@ import org.springframework.web.bind.annotation.*;
 
 import java.time.Instant;
 import java.time.LocalDateTime;
-import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 
-@CrossOrigin(origins = {"http://localhost:3000", "http://localhost:5173"}, allowCredentials = "true", maxAge = 3600)
+@CrossOrigin(origins = "${frontend.url}", allowCredentials = "true", maxAge = 3600)
 @RestController
 @RequestMapping("/api/sessions")
 @PreAuthorize("hasAnyRole('CAFE_ADMIN', 'OPERATOR')")

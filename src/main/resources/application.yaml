@@ -3,9 +3,9 @@ server:
 
 spring:
   datasource:
-    url: jdbc:mysql://localhost:3306/cafectrl_db?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
-    username: root
-    password: root
+    url: ${DB_URL:jdbc:mysql://localhost:3306/cafectrl_db?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true}
+    username: ${DB_USER:root}
+    password: ${DB_PASS:root}
     driver-class-name: com.mysql.cj.jdbc.Driver
 
     hikari:
@@ -48,3 +48,6 @@ app:
   super-admin:
     email: admin@admin.com
     password: admin
+
+frontend:
+  url: ${FRONTEND_URL:http://localhost:3000}

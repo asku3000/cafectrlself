@@ -22,7 +22,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
-@CrossOrigin(origins = {"http://localhost:3000", "http://localhost:5173"}, allowCredentials = "true")
+@CrossOrigin(origins = "${frontend.url}", allowCredentials = "true")
 @RestController
 @RequestMapping("/api/reports")
 @PreAuthorize("hasAnyRole('CAFE_ADMIN', 'OPERATOR')")

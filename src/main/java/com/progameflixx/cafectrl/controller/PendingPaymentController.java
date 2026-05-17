@@ -13,7 +13,7 @@ import java.util.Map;
 
 @RestController
 @RequestMapping("/api/pending-payments")
-@CrossOrigin(origins = {"http://localhost:3000", "http://localhost:5173"}, allowCredentials = "true")
+@CrossOrigin(origins = "${frontend.url}", allowCredentials = "true")
 public class PendingPaymentController {
 
     @Autowired

@@ -23,7 +23,7 @@ import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("/api/customers")
-@CrossOrigin(origins = {"http://localhost:3000", "http://localhost:5173"}, allowCredentials = "true")
+@CrossOrigin(origins = "${frontend.url}", allowCredentials = "true")
 public class CustomerController {
 
     @Autowired

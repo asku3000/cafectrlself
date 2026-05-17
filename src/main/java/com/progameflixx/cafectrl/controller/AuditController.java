@@ -23,7 +23,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-@CrossOrigin(origins = {"http://localhost:3000", "http://localhost:5173"}, allowCredentials = "true", maxAge = 3600)
+@CrossOrigin(origins = "${frontend.url}", allowCredentials = "true", maxAge = 3600)
 @RestController
 @RequestMapping("/api/audit")
 @PreAuthorize("hasAnyRole('SUPER_ADMIN', 'CAFE_ADMIN', 'OPERATOR')")

@@ -15,7 +15,7 @@ import java.util.List;
 import java.util.Map;
 
 // 1. ADDED CORS TO PREVENT REACT CRASHES
-@CrossOrigin(origins = {"http://localhost:3000", "http://localhost:5173"}, allowCredentials = "true", maxAge = 3600)
+@CrossOrigin(origins = "${frontend.url}", allowCredentials = "true", maxAge = 3600)
 @RestController
 @RequestMapping("/api")
 @PreAuthorize("hasRole('CAFE_ADMIN')")
