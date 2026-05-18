@@ -9,6 +9,7 @@ import org.springframework.security.core.Authentication;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -201,7 +202,7 @@ public class CafeAdminController {
 
         // 2. Fetch all ACTIVE sessions for this cafe
         List<CustomerSession> activeSessions = sessionRepository.findByCafeIdAndStatus(cafeId, "active");
-
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'");
         // 3. Build a map of Resource ID -> Active Session Data
         Map<String, Map<String, Object>> activeMap = new HashMap<>();
         for (CustomerSession s : activeSessions) {
@@ -211,7 +212,7 @@ public class CafeAdminController {
                     activeData.put("customer_name", s.getCustomerName());
                     activeData.put("session_id", s.getId());
                     // Convert LocalDateTime to ISO string for React to parse
-                    activeData.put("start_time", g.getStartTime().toString());
+                    activeData.put("start_time", g.getStartTime().format(formatter));
 
                     activeMap.put(g.getResourceId(), activeData);
                 }
