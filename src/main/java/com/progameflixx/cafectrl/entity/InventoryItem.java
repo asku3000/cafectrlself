@@ -22,6 +22,9 @@ public class InventoryItem {
     private String category; // "snack" | "drink" | "other"
     private Double price;
     private Integer stock;
+    @JsonProperty("is_trackable")
+    @Column(name = "is_trackable", nullable = false)
+    private Boolean isTrackable;
 
     private Instant createdAt = Instant.now();
 }

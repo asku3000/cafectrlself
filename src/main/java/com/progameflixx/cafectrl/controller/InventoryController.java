@@ -3,6 +3,8 @@ package com.progameflixx.cafectrl.controller;
 import com.progameflixx.cafectrl.entity.InventoryItem;
 import com.progameflixx.cafectrl.repository.InventoryRepository;
 import com.progameflixx.cafectrl.repository.UserRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -17,6 +19,7 @@ import java.util.Map;
 @RequestMapping("/api/inventory")
 @PreAuthorize("hasAnyRole('CAFE_ADMIN', 'OPERATOR')")
 public class InventoryController {
+    private static final Logger logger = LoggerFactory.getLogger(InventoryController.class);
 
     @Autowired
     private InventoryRepository inventoryRepository;
@@ -37,8 +40,14 @@ public class InventoryController {
 
     @PostMapping
     public InventoryItem createInventory(@RequestBody InventoryItem item, Authentication auth) {
-        item.setCafeId(getCafeId(auth));
-        return inventoryRepository.save(item);
+        try {
+            logger.info("Inventory Item: {}", item);
+            item.setCafeId(getCafeId(auth));
+            return inventoryRepository.save(item);
+        } catch (Exception e) {
+            logger.error("Error occurred", e);
+            return null;
+        }
     }
 
     @PutMapping("/{iid}")

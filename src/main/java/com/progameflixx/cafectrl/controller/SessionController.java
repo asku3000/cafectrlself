@@ -297,7 +297,7 @@ public class SessionController {
             }
 
             // --- THE MEANINGFUL ERROR FIX ---
-            if (item.getStock() != null) {
+            if (Boolean.TRUE.equals(item.getIsTrackable()) && item.getStock() != null) {
                 if (item.getStock() < qty) {
                     // We use "message" because many React error formatters look for that key
                     String errorMsg = "Insufficient stock! " + item.getName() + " has only " + item.getStock() + " units left.";
