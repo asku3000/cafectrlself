@@ -17,6 +17,7 @@ import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 @CrossOrigin(origins = "${frontend.url}", allowCredentials = "true", maxAge = 3600)
 @RestController
@@ -256,6 +257,18 @@ public class SessionController {
         LocalDateTime now = LocalDateTime.now();
         for (GameSession g : session.getGames()) {
             if ("active".equals(g.getStatus())) {
+                if(g.getItems() != null){
+                    for(GameSessionItem gameSessionItem : g.getItems()){
+
+                        // FIX: Use the reference ID of the product, NOT the session item's ID
+                        // Note: Change getRefId() to getItemId() or getInventoryItemId() depending on what you named it in your GameSessionItem class!
+                        String productId = gameSessionItem.getRefId();
+
+                        Optional<InventoryItem> invItemOptional = inventoryRepository.findById(productId);
+
+                        invItemOptional.ifPresent(item -> restoreStock(item, gameSessionItem.getQty()));
+                    }
+                }
                 g.setStatus("cancelled");
                 g.setEndTime(now);
             }
@@ -263,6 +276,29 @@ public class SessionController {
         session.setStatus("cancelled");
         session.setBilledAt(now);
         return ResponseEntity.ok(sessionRepository.save(session));
+    }
+
+    private void restoreStock(InventoryItem returnedItem, int quantityReturned) {
+        if (Boolean.TRUE.equals(returnedItem.getIsTrackable())) {
+            // 1. It's a direct trackable item (e.g., a Can of Coke)
+            returnedItem.setStock(returnedItem.getStock() + quantityReturned);
+            inventoryRepository.save(returnedItem);
+        } else {
+            // 2. It's an untracked Menu Item (e.g., Aloo Tikki Burger).
+            // We must return the raw materials to the inventory!
+            if (returnedItem.getIngredients() != null && !returnedItem.getIngredients().isEmpty()) {
+                for (ItemRecipe recipe : returnedItem.getIngredients()) {
+                    InventoryItem rawMaterial = recipe.getRawMaterial();
+
+                    // Calculate total raw material to restore (Cancelled 2 Burgers * 1 Patty = Restore 2 Patties)
+                    double totalToRestore = recipe.getQuantityRequired() * quantityReturned;
+
+                    // Add the stock back to the raw material
+                    rawMaterial.setStock((int) (rawMaterial.getStock() + totalToRestore));
+                    inventoryRepository.save(rawMaterial);
+                }
+            }
+        }
     }
 
     // --- ADD SNACK / ACCESSORY TO GAME ---
@@ -307,6 +343,22 @@ public class SessionController {
 
                 item.setStock(item.getStock() - qty);
                 inventoryRepository.save(item);
+            } else{
+                // 2. It's an untracked Menu Item (e.g., Masala Maggi).
+                // Check if it has a recipe attached!
+                if (item.getIngredients() != null && !item.getIngredients().isEmpty()) {
+
+                    for (ItemRecipe recipe : item.getIngredients()) {
+                        InventoryItem rawMaterial = recipe.getRawMaterial();
+                        // Calculate total raw material needed (Sold 2 Burgers * 1 Patty = Deduct 2 Patties)
+                        double totalRequired = recipe.getQuantityRequired() * qty;
+                        try {
+                            deductStock(rawMaterial, totalRequired);
+                        } catch (Exception e) {
+                            return ResponseEntity.status(400).body(Map.of("message", e.getMessage()));
+                        }
+                    }
+                }
             }
 
             itemName = item.getName();
@@ -333,6 +385,14 @@ public class SessionController {
         targetGame.getItems().add(sessionItem);
 
         return ResponseEntity.ok(sessionRepository.save(session));
+    }
+
+    private void deductStock(InventoryItem item, double amountToDeduct) {
+        if (item.getStock() < amountToDeduct) {
+            throw new RuntimeException("Not enough raw stock for: " + item.getName());
+        }
+        item.setStock((int) (item.getStock() - amountToDeduct));
+        inventoryRepository.save(item);
     }
 
     // --- REMOVE SNACK / ACCESSORY ---

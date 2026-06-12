@@ -1,6 +1,8 @@
 package com.progameflixx.cafectrl.controller;
 
+import com.progameflixx.cafectrl.dto.InventoryRequestDTO;
 import com.progameflixx.cafectrl.entity.InventoryItem;
+import com.progameflixx.cafectrl.entity.ItemRecipe;
 import com.progameflixx.cafectrl.repository.InventoryRepository;
 import com.progameflixx.cafectrl.repository.UserRepository;
 import org.slf4j.Logger;
@@ -11,6 +13,7 @@ import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -39,11 +42,46 @@ public class InventoryController {
     }
 
     @PostMapping
-    public InventoryItem createInventory(@RequestBody InventoryItem item, Authentication auth) {
+    public InventoryItem createInventory(@RequestBody InventoryRequestDTO request, Authentication auth) {
         try {
-            logger.info("Inventory Item: {}", item);
-            item.setCafeId(getCafeId(auth));
-            return inventoryRepository.save(item);
+            logger.info("Inventory Item: {}", request);
+            // 1. Create the base item
+            InventoryItem newItem = new InventoryItem();
+            newItem.setName(request.getName());
+            newItem.setCategory(request.getCategory());
+            newItem.setPrice(request.getPrice());
+            newItem.setIsTrackable(request.getIsTrackable());
+            newItem.setStock(request.getStock());
+            newItem.setCafeId(getCafeId(auth));
+
+            // 2. Handle the Recipe / Ingredients if it's untrackable
+            if (Boolean.FALSE.equals(request.getIsTrackable()) && request.getIngredients() != null) {
+
+                List<ItemRecipe> recipes = new ArrayList<>();
+
+                for (InventoryRequestDTO.IngredientDTO ing : request.getIngredients()) {
+                    // Fetch the actual raw material from the DB
+                    InventoryItem rawMaterial = inventoryRepository.findById(ing.getRawMaterialId().toString())
+                            .orElseThrow(() -> new RuntimeException("Raw material not found!"));
+
+                    ItemRecipe recipe = new ItemRecipe();
+                    recipe.setRawMaterial(rawMaterial);
+                    recipe.setQuantityRequired(ing.getQuantityRequired());
+
+                    // CRITICAL STEP: Tell the recipe who its parent is!
+                    recipe.setMenuItem(newItem);
+
+                    recipes.add(recipe);
+                }
+
+                // Attach the list of recipes to the burger
+                newItem.setIngredients(recipes);
+            }
+
+            // 3. Save to database (CascadeType.ALL will automatically save the recipes too!)
+            inventoryRepository.save(newItem);
+
+            return newItem;
         } catch (Exception e) {
             logger.error("Error occurred", e);
             return null;
