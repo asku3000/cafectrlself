@@ -197,13 +197,12 @@ public class CafeAdminController {
     public List<Map<String, Object>> listResources(Authentication auth) {
         String cafeId = getCafeId(auth);
 
-        // 1. Fetch all resources for this cafe
         List<Resource> resources = resourceRepository.findByCafeId(cafeId);
-
-        // 2. Fetch all ACTIVE sessions for this cafe
         List<CustomerSession> activeSessions = sessionRepository.findByCafeIdAndStatus(cafeId, "active");
-        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'");
-        // 3. Build a map of Resource ID -> Active Session Data
+
+        // FIX: Remove the 'Z' from the pattern here
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
+
         Map<String, Map<String, Object>> activeMap = new HashMap<>();
         for (CustomerSession s : activeSessions) {
             for (GameSession g : s.getGames()) {
@@ -211,15 +210,12 @@ public class CafeAdminController {
                     Map<String, Object> activeData = new HashMap<>();
                     activeData.put("customer_name", s.getCustomerName());
                     activeData.put("session_id", s.getId());
-                    // Convert LocalDateTime to ISO string for React to parse
                     activeData.put("start_time", g.getStartTime().format(formatter));
-
                     activeMap.put(g.getResourceId(), activeData);
                 }
             }
         }
 
-        // 4. Combine them into the exact JSON format React expects
         List<Map<String, Object>> response = new ArrayList<>();
         for (Resource r : resources) {
             Map<String, Object> rMap = new HashMap<>();
@@ -228,12 +224,8 @@ public class CafeAdminController {
             rMap.put("name", r.getName());
             rMap.put("game_type_id", r.getGameTypeId());
             rMap.put("rate_card_id", r.getRateCardId());
-            rMap.put("is_active", r.getIsActive()); // Safely mapped as is_active now!
-
-            // This is the magic key React was looking for.
-            // It will be null if there is no active session on this console.
+            rMap.put("is_active", r.getIsActive());
             rMap.put("active", activeMap.get(r.getId()));
-
             response.add(rMap);
         }
 
