@@ -5,6 +5,8 @@ import jakarta.persistence.*;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 import lombok.ToString;
+import tools.jackson.databind.annotation.JsonDeserialize;
+import tools.jackson.databind.ext.javatime.deser.LocalDateTimeDeserializer;
 
 import java.time.LocalDateTime;
 import java.util.LinkedHashSet;
@@ -63,11 +65,14 @@ public class GameSession {
 
     @Column(name = "start_time")
     @JsonProperty("start_time")
-    @JsonFormat(pattern = "yyyy-MM-dd'T'HH:mm:ss'Z'", timezone = "UTC")
+    @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd'T'HH:mm:ss")
+    @JsonDeserialize(using = LocalDateTimeDeserializer.class)
     private LocalDateTime startTime;
 
     @Column(name = "end_time")
     @JsonProperty("end_time")
+    @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd'T'HH:mm:ss")
+    @JsonDeserialize(using = LocalDateTimeDeserializer.class)
     private LocalDateTime endTime;
 
     private String status = "active"; // "active" | "soft_closed" | "billed"

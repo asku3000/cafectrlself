@@ -15,6 +15,7 @@ import org.springframework.web.bind.annotation.*;
 
 import java.time.Instant;
 import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -86,7 +87,7 @@ public class SessionController {
         if (payload.containsKey("start_time") && payload.get("start_time") != null) {
             String st = (String) payload.get("start_time");
             // Parse React's UTC string and securely convert it to Local IST time!
-            game.setStartTime(Instant.parse(st).atZone(java.time.ZoneId.systemDefault()).toLocalDateTime());
+            game.setStartTime(LocalDateTime.parse(st, DateTimeFormatter.ISO_LOCAL_DATE_TIME));
         } else {
             game.setStartTime(LocalDateTime.now());
         }
@@ -211,7 +212,7 @@ public class SessionController {
         // Parse React's UTC string and securely convert it to Local IST time!
         if (payload.containsKey("start_time") && payload.get("start_time") != null) {
             String st = (String) payload.get("start_time");
-            game.setStartTime(java.time.Instant.parse(st).atZone(java.time.ZoneId.systemDefault()).toLocalDateTime());
+            game.setStartTime(LocalDateTime.parse(st, DateTimeFormatter.ISO_LOCAL_DATE_TIME));
         } else {
             game.setStartTime(LocalDateTime.now());
         }
@@ -236,7 +237,7 @@ public class SessionController {
                 g.setStatus("soft_closed");
                 if (payload.containsKey("end_time") && payload.get("end_time") != null) {
                     String st = (String) payload.get("end_time");
-                    g.setEndTime(Instant.parse(st).atZone(java.time.ZoneId.systemDefault()).toLocalDateTime());
+                    g.setEndTime(LocalDateTime.parse(st, java.time.format.DateTimeFormatter.ISO_LOCAL_DATE_TIME));
                 } else {
                     g.setEndTime(LocalDateTime.now());
                 }
