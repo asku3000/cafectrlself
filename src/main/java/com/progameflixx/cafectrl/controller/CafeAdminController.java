@@ -89,6 +89,7 @@ public class CafeAdminController {
         staffReq.setCafeId(getCafeId(auth));
         staffReq.setRole("OPERATOR");
         staffReq.setPassword(passwordEncoder.encode(staffReq.getPassword()));
+        staffReq.setActive(true);
         return userRepository.save(staffReq);
     }
 
@@ -130,7 +131,7 @@ public class CafeAdminController {
             op.getPermissions().clear();
             op.getPermissions().addAll(req.getPermissions());
         }
-
+        op.setActive(req.isActive());
         return ResponseEntity.ok(userRepository.save(op));
     }
 

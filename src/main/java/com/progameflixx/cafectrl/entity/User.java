@@ -29,6 +29,7 @@ public class User {
     @Column(name = "permission")
     private List<String> permissions;
 
-    private boolean isActive = true;
+    @JsonProperty("is_active")
+    private boolean isActive;
     private Instant createdAt = Instant.now();
 }
