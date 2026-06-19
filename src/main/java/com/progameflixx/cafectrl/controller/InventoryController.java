@@ -14,10 +14,8 @@ import org.springframework.security.core.Authentication;
 import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
+import java.util.stream.Collectors;
 
 @CrossOrigin(origins = "${frontend.url}", allowCredentials = "true", maxAge = 3600)
 @RestController
@@ -42,12 +40,37 @@ public class InventoryController {
     public List<InventoryItem> listInventory(@RequestParam(value = "notInclude", required = false) String notIncludeCategories, Authentication auth) {
         logger.info("categories not to include {}", notIncludeCategories);
         if (notIncludeCategories == null || notIncludeCategories.isBlank()) {
-            return inventoryRepository.findByCafeId(getCafeId(auth));
+            return getSortedBasedOnCategory(inventoryRepository.findByCafeId(getCafeId(auth)));
         } else {
             Collection<String> notInclude = List.of(notIncludeCategories.split(","));
             logger.info("notinclude list {}", notInclude);
-            return inventoryRepository.findByCafeIdAndCategoryNotIn(getCafeId(auth), notInclude);
+            return getSortedBasedOnCategory(inventoryRepository.findByCafeIdAndCategoryNotIn(getCafeId(auth), notInclude));
         }
+    }
+
+    public List<InventoryItem> getSortedBasedOnCategory(List<InventoryItem> list){
+        // Create a custom Comparator to sort by the last word of the name
+        Comparator<InventoryItem> byLastWordCategory = Comparator.comparing(item -> {
+            String name = item.getName();
+            if (name == null || name.trim().isEmpty()) {
+                return ""; // Safe fallback for empty names
+            }
+
+            // Split by one or more spaces
+            String[] words = name.trim().split("\\s+");
+
+            // Return the very last word, converted to lowercase for accurate sorting
+            return words[words.length - 1].toLowerCase();
+        });
+
+        //  Sort the stream.
+        // We also chain .thenComparing() so if two items have the same last word
+        // (e.g., "Chicken Burger" and "Veg Burger"), they sort alphabetically!
+        return list.stream()
+                .sorted(byLastWordCategory.thenComparing(item ->
+                        item.getName() == null ? "" : item.getName().toLowerCase()
+                ))
+                .collect(Collectors.toList());
     }
 
     @PostMapping
