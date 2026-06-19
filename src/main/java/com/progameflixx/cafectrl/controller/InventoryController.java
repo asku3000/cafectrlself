@@ -104,10 +104,38 @@ public class InventoryController {
             return ResponseEntity.notFound().build();
         }
 
+        // 1. Map the basic fields
         if (updates.getName() != null) existing.setName(updates.getName());
         if (updates.getCategory() != null) existing.setCategory(updates.getCategory());
         if (updates.getPrice() != null) existing.setPrice(updates.getPrice());
         if (updates.getStock() != null) existing.setStock(updates.getStock());
+
+        // 2. Map the boolean toggle! (Make sure your entity uses 'Boolean' wrapper, not 'boolean' primitive)
+        if (updates.getIsTrackable() != null) {
+            existing.setIsTrackable(updates.getIsTrackable());
+        }
+
+        // 3. The JPA-Safe way to update an ingredients list
+        if (updates.getIngredients() != null) {
+            existing.getIngredients().clear();
+
+            for (ItemRecipe incomingIngredient : updates.getIngredients()) {
+                // A. Link the recipe to the parent (Aloo Tikki Burger)
+                incomingIngredient.setMenuItem(existing);
+
+                // B. THE FIX: Fetch the actual Raw Material (Burger Bun) from the DB
+                // using the transient ID we caught from the React JSON
+                if (incomingIngredient.getRawMaterialId() != null) {
+                    InventoryItem rawItem = inventoryRepository.findById(incomingIngredient.getRawMaterialId())
+                            .orElseThrow(() -> new RuntimeException("Raw material not found!"));
+
+                    // Attach the true database object to the recipe
+                    incomingIngredient.setRawMaterial(rawItem);
+                }
+
+                existing.getIngredients().add(incomingIngredient);
+            }
+        }
 
         return ResponseEntity.ok(inventoryRepository.save(existing));
     }
