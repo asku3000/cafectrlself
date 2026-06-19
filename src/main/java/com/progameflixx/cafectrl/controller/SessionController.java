@@ -420,10 +420,28 @@ public class SessionController {
                     // Refund the stock ONLY if it's an inventory item
                     if ("inventory".equalsIgnoreCase(itemToRemove.getType())) {
                         InventoryItem inv = inventoryRepository.findById(itemToRemove.getRefId()).orElse(null);
+
                         if (inv != null) {
-                            // Add the quantity back to the fridge!
-                            inv.setStock(inv.getStock() + itemToRemove.getQty());
-                            inventoryRepository.save(inv);
+                            // THE FIX: Check if it's a trackable item or a recipe!
+                            if (Boolean.TRUE.equals(inv.getIsTrackable())) {
+                                // Standard Item: Add the quantity back to the fridge!
+                                inv.setStock(inv.getStock() + itemToRemove.getQty());
+                                inventoryRepository.save(inv);
+                            } else {
+                                // Recipe Item: Refund the raw materials!
+                                if (inv.getIngredients() != null) {
+                                    for (ItemRecipe recipe : inv.getIngredients()) {
+                                        InventoryItem rawMaterial = recipe.getRawMaterial();
+
+                                        // Calculate how much raw material to refund
+                                        // (Qty of ingredients per item) * (Number of items deleted)
+                                        int refundQty = (int) (recipe.getQuantityRequired() * itemToRemove.getQty());
+
+                                        rawMaterial.setStock(rawMaterial.getStock() + refundQty);
+                                        inventoryRepository.save(rawMaterial);
+                                    }
+                                }
+                            }
                         }
                     }
 
