@@ -8,13 +8,9 @@ import java.util.TimeZone;
 
 @SpringBootApplication
 public class BookingsApplication {
-	@PostConstruct
-	public void init() {
-		// Force the entire Java server to run in Indian Standard Time
-		TimeZone.setDefault(TimeZone.getTimeZone("Asia/Kolkata"));
-	}
 
 	public static void main(String[] args) {
+		TimeZone.setDefault(TimeZone.getTimeZone("Asia/Kolkata"));
 		SpringApplication.run(BookingsApplication.class, args);
 	}
 
