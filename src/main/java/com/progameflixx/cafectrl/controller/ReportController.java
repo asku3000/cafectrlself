@@ -60,6 +60,11 @@ public class ReportController {
         List<com.progameflixx.cafectrl.entity.CustomerSession> sessions =
                 sessionRepository.findMonthlyReportData(cafeId, "billed", start, end);
 
+        sessions.sort((s1, s2) -> {
+            if (s1.getCreatedAt() == null || s2.getCreatedAt() == null) return 0; // Null safety
+            return s2.getCreatedAt().compareTo(s1.getCreatedAt());
+        });
+
         // NEW: Fetch debts that were cleared today
         List<com.progameflixx.cafectrl.entity.PendingPayment> clearedToday =
                 pendingPaymentRepository.findByCafeIdAndStatusAndClearedAtBetween(cafeId, "CLEARED", start, end);
