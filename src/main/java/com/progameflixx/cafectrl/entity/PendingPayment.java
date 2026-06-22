@@ -25,4 +25,6 @@ public class PendingPayment {
     private LocalDateTime clearedAt;
     private String settlementMode; // "CASH", "UPI", "CARD"
 
+    private String notes;
+
 }
