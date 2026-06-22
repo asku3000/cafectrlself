@@ -89,6 +89,8 @@ public class CustomerSession {
     @JsonProperty("bill_breakdown")
     private java.util.Map<String, Object> billBreakdown;
 
+    private String notes;
+
     // Helper method to keep JPA synchronization perfect
     public void addGame(GameSession game) {
         games.add(game);

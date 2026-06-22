@@ -124,12 +124,14 @@ public class SessionController {
             return ResponseEntity.notFound().build();
         }
 
-        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime effectiveClosingTime = (req.getManualBilledAt() != null)
+                ? req.getManualBilledAt()
+                : LocalDateTime.now();
 
         for (GameSession g : session.getGames()) {
             if ("active".equals(g.getStatus())) {
                 g.setStatus("soft_closed");
-                g.setEndTime(now);
+                g.setEndTime(effectiveClosingTime);
             }
         }
 
@@ -140,9 +142,11 @@ public class SessionController {
         double grandTotal = (Double) bill.get("grand_total");
 
         session.setStatus("billed");
-        session.setBilledAt(now);
+        session.setBilledAt(effectiveClosingTime);
         session.setBillTotal(grandTotal);
-
+        if (req.getNotes() != null) {
+            session.setNotes(req.getNotes());
+        }
         // Simply set the payments directly from the perfectly mapped request object
         if (req.getPayments() != null) {
             session.setPayments(req.getPayments());
