@@ -36,6 +36,8 @@ public interface CustomerSessionRepository extends JpaRepository<CustomerSession
     List<CustomerSession> findByCafeIdAndStatusAndBilledAtBetween(
             String cafeId, String status, LocalDateTime start, LocalDateTime end);
 
+    List<CustomerSession> findByCafeIdAndStatusAndCreatedAtBetween(String cafeId, String status, LocalDateTime start, LocalDateTime end);
+
     long countByCafeIdAndStatus(String cafeId, String status);
 
     @Query("SELECT DISTINCT s FROM CustomerSession s " +

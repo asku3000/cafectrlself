@@ -57,10 +57,18 @@ public class ReportController {
         LocalDateTime start = date.atStartOfDay();
         LocalDateTime end = date.atTime(LocalTime.MAX);
 
-        List<com.progameflixx.cafectrl.entity.CustomerSession> sessions =
+        List<com.progameflixx.cafectrl.entity.CustomerSession> billedSessions =
                 sessionRepository.findMonthlyReportData(cafeId, "billed", start, end);
 
-        sessions.sort((s1, s2) -> {
+        // 2. NEW: Fetch the Cancelled sessions
+        List<com.progameflixx.cafectrl.entity.CustomerSession> cancelledSessions =
+                sessionRepository.findByCafeIdAndStatusAndCreatedAtBetween(cafeId, "cancelled", start, end);
+
+        // 3. Merge them into one master list for the UI
+        List<com.progameflixx.cafectrl.entity.CustomerSession> allSessions = new ArrayList<>(billedSessions);
+        allSessions.addAll(cancelledSessions);
+
+        billedSessions.sort((s1, s2) -> {
             if (s1.getCreatedAt() == null || s2.getCreatedAt() == null) return 0; // Null safety
             return s2.getCreatedAt().compareTo(s1.getCreatedAt());
         });
@@ -80,7 +88,11 @@ public class ReportController {
         List<Map<String, Object>> itemsTimeline = new ArrayList<>();
         Map<String, Double> hourlyGames = new HashMap<>();
 
-        for (com.progameflixx.cafectrl.entity.CustomerSession s : sessions) {
+        for (com.progameflixx.cafectrl.entity.CustomerSession s : allSessions) {
+
+            if ("cancelled".equalsIgnoreCase(s.getStatus())) {
+                continue;
+            }
             String hourKey = s.getBilledAt() != null ? s.getBilledAt().getHour() + ":00" : "00:00";
 
             // 1. Process Payments (Cash Accounting Logic)
@@ -188,8 +200,10 @@ public class ReportController {
         resp.put("by_game_type", byGameType);
         resp.put("items_timeline", itemsTimeline);
         resp.put("games_timeline", convertToTimeline(hourlyGames)); // (Assuming you have this helper method below)
-        resp.put("count", sessions.size());
-        resp.put("sessions", sessions);
+        // Keep the "Bills" count strictly to successful bills, but pass the new master list
+        resp.put("count", billedSessions.size());
+        resp.put("cancelled_count", cancelledSessions.size()); // Optional: in case you want to show a cancelled counter in UI
+        resp.put("sessions", allSessions);
         resp.put("recovered_debts", recoveredDebts);
         return resp;
     }
