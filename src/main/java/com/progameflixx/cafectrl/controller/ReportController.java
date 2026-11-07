@@ -68,7 +68,7 @@ public class ReportController {
         List<com.progameflixx.cafectrl.entity.CustomerSession> allSessions = new ArrayList<>(billedSessions);
         allSessions.addAll(cancelledSessions);
 
-        billedSessions.sort((s1, s2) -> {
+        allSessions.sort((s1, s2) -> {
             if (s1.getCreatedAt() == null || s2.getCreatedAt() == null) return 0; // Null safety
             return s2.getCreatedAt().compareTo(s1.getCreatedAt());
         });
