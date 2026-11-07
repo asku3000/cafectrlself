@@ -48,8 +48,7 @@ public class InventoryController {
         }
     }
 
-    public List<InventoryItem> getSortedBasedOnCategory(List<InventoryItem> list){
-        // Create a custom Comparator to sort by the last word of the name
+    public List<InventoryItem> getSortedBasedOnCategory(List<InventoryItem> list){// 1. Create a custom Comparator to sort by the last word of the name
         Comparator<InventoryItem> byLastWordCategory = Comparator.comparing(item -> {
             String name = item.getName();
             if (name == null || name.trim().isEmpty()) {
@@ -63,13 +62,20 @@ public class InventoryController {
             return words[words.length - 1].toLowerCase();
         });
 
-        //  Sort the stream.
-        // We also chain .thenComparing() so if two items have the same last word
-        // (e.g., "Chicken Burger" and "Veg Burger"), they sort alphabetically!
+        // 2. Sort the stream with the new primary Ingredient rule
         return list.stream()
-                .sorted(byLastWordCategory.thenComparing(item ->
-                        item.getName() == null ? "" : item.getName().toLowerCase()
-                ))
+                .sorted(
+                        // PRIORITY 1: Push ingredients to the bottom (0 sorts before 1)
+                        Comparator.comparingInt((InventoryItem item) ->
+                                        "ingredient".equalsIgnoreCase(item.getCategory()) ? 1 : 0
+                                )
+                                // PRIORITY 2: Sort by the last word
+                                .thenComparing(byLastWordCategory)
+                                // PRIORITY 3: Sort alphabetically if the last words are identical
+                                .thenComparing(item ->
+                                        item.getName() == null ? "" : item.getName().toLowerCase()
+                                )
+                )
                 .collect(Collectors.toList());
     }
 
