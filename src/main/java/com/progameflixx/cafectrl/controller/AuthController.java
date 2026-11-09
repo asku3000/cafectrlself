@@ -73,6 +73,7 @@ public class AuthController {
         user.setName(req.getName());
         user.setRole("CAFE_ADMIN");
         user.setCafeId(cafe.getId());
+        user.setActive(true);
         userRepository.save(user);
 
         // Update Cafe Owner
