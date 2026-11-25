@@ -115,21 +115,31 @@ public class CafeAdminController {
 
     @DeleteMapping("/staff/{uid}")
     public ResponseEntity<?> deleteOperator(@PathVariable String uid, Authentication auth) {
-        logger.info("Deleting operator {}", uid);
-        userRepository.deleteById(uid);
+        String cafeId = getCafeId(auth);
+        User op = userRepository.findById(uid).orElse(null);
+
+        // Security Check: only staff belonging to this admin's cafe may be deleted
+        if (op == null || !cafeId.equals(op.getCafeId())) {
+            logger.warn("Delete operator rejected: {} not found in this cafe", uid);
+            return ResponseEntity.status(404).body(Map.of("message", "Operator not found"));
+        }
+
+        logger.info("Deleting operator {} ({}, '{}')", uid, op.getEmail(), op.getName());
+        userRepository.delete(op);
         return ResponseEntity.ok().build();
     }
 
     @PutMapping("/staff/{id}")
     @PreAuthorize("hasRole('CAFE_ADMIN')")
     @org.springframework.transaction.annotation.Transactional
-    public ResponseEntity<?> updateStaff(@PathVariable String id, @RequestBody User req) {
+    public ResponseEntity<?> updateStaff(@PathVariable String id, @RequestBody User req, Authentication auth) {
+        String cafeId = getCafeId(auth);
 
-        // 1. Find the existing operator
+        // 1. Find the existing operator (must belong to this admin's cafe)
         logger.info("Update operator {} requested", id);
         User op = userRepository.findById(id).orElse(null);
-        if (op == null) {
-            logger.warn("Update operator: {} not found", id);
+        if (op == null || !cafeId.equals(op.getCafeId())) {
+            logger.warn("Update operator rejected: {} not found in this cafe", id);
             return ResponseEntity.status(404).body(Map.of("message", "Operator not found"));
         }
 

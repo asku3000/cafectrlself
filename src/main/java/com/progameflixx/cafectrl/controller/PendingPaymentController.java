@@ -45,15 +45,17 @@ public class PendingPaymentController {
     @PostMapping("/{id}/clear")
     @PreAuthorize("hasAnyRole('CAFE_ADMIN', 'OPERATOR')")
     @Transactional // <-- CRITICAL: If the server crashes on row 2, the whole split rolls back instantly!
-    public ResponseEntity<?> clearPayment(@PathVariable Long id, @RequestBody DebtClearRequest req) {
+    public ResponseEntity<?> clearPayment(@PathVariable Long id, @RequestBody DebtClearRequest req, Authentication auth) {
+        String cafeId = getCafeId(auth);
 
         logger.info("Clear pending payment {} requested: payments={}", id, req.getPayments());
         PendingPayment existingDebt = pendingPaymentRepository.findById(id).orElse(null);
-        if (existingDebt == null) {
-            logger.warn("Clear pending payment: {} not found", id);
+
+        // Security Check: the debt must belong to the caller's cafe
+        if (existingDebt == null || !cafeId.equals(existingDebt.getCafeId())) {
+            logger.warn("Clear pending payment: {} not found in this cafe", id);
             return ResponseEntity.notFound().build();
         }
-        LogContext.putCafeId(existingDebt.getCafeId());
 
         if ("CLEARED".equalsIgnoreCase(existingDebt.getStatus())) {
             logger.warn("Clear pending payment {} rejected: already cleared", id);

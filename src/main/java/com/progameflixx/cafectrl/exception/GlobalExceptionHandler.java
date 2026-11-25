@@ -3,7 +3,9 @@ package com.progameflixx.cafectrl.exception;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.bind.annotation.ControllerAdvice;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.server.ResponseStatusException;
@@ -23,6 +25,15 @@ public class GlobalExceptionHandler {
         Map<String, String> body = new HashMap<>();
         body.put("detail", ex.getReason());
         return new ResponseEntity<>(body, ex.getStatusCode());
+    }
+
+    // Role checks (@PreAuthorize) failing must stay a 403, not fall into the 500 catch-all below
+    @ExceptionHandler(AccessDeniedException.class)
+    public ResponseEntity<Map<String, String>> handleAccessDenied(AccessDeniedException ex, HttpServletRequest request) {
+        logger.warn("Access denied on {} {}: {}", request.getMethod(), request.getRequestURI(), ex.getMessage());
+        Map<String, String> body = new HashMap<>();
+        body.put("detail", "Access denied");
+        return ResponseEntity.status(HttpStatus.FORBIDDEN).body(body);
     }
 
     // Catch-all for unexpected server errors
