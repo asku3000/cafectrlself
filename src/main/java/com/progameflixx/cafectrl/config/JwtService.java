@@ -34,6 +34,7 @@ public class JwtService {
         claims.put("email", email);
         claims.put("role", role);
         claims.put("type", "access");
+        logger.debug("Issuing access token for {} with role {}", email, role);
 
         return Jwts.builder()
                 .claims(claims)
@@ -58,6 +59,7 @@ public class JwtService {
             extractAllClaims(token);
             return true; // If it parses without throwing an exception, it is valid/unexpired
         } catch (Exception e) {
+            logger.debug("JWT validation failed: {}", e.getMessage());
             return false;
         }
     }
@@ -69,7 +71,7 @@ public class JwtService {
     // Generic method to extract any specific piece of data (claim) from the token
     public <T> T extractClaim(String token, Function<Claims, T> claimsResolver) {
         final Claims claims = extractAllClaims(token);
-        logger.info("Username of logged in user :{}",claims.getSubject());
+        logger.debug("Extracted claims for subject {}", claims.getSubject());
         return claimsResolver.apply(claims);
     }
 }

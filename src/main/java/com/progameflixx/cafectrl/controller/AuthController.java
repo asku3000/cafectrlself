@@ -6,6 +6,7 @@ import com.progameflixx.cafectrl.dto.SignupRequest;
 import com.progameflixx.cafectrl.entity.Cafe;
 import com.progameflixx.cafectrl.entity.PasswordResetToken;
 import com.progameflixx.cafectrl.entity.User;
+import com.progameflixx.cafectrl.logging.LogContext;
 import com.progameflixx.cafectrl.repository.CafeRepository;
 import com.progameflixx.cafectrl.repository.PasswordResetTokenRepository;
 import com.progameflixx.cafectrl.repository.UserRepository;
@@ -53,8 +54,10 @@ public class AuthController {
     @Transactional // Ensures both User and Cafe save, or neither do
     public ResponseEntity<?> signup(@RequestBody SignupRequest req) {
         String email = req.getEmail().toLowerCase();
+        logger.info("Signup attempt for {} (cafe '{}')", email, req.getCafeName());
 
         if (userRepository.findByEmail(email).isPresent()) {
+            logger.warn("Signup rejected: email {} already registered", email);
             return ResponseEntity.badRequest().body("Email already registered");
         }
 
@@ -79,6 +82,9 @@ public class AuthController {
         // Update Cafe Owner
         cafe.setOwnerId(user.getId());
         cafeRepository.save(cafe);
+        LogContext.putUser(user.getEmail(), user.getRole());
+        LogContext.putCafeId(cafe.getId());
+        logger.info("Signup successful: user {} created as owner of cafe {} ('{}')", user.getId(), cafe.getId(), cafe.getName());
 
         // 3. Generate JWT & Cookie
         String token = jwtService.generateToken(user.getId(), user.getEmail(), user.getRole());
@@ -102,16 +108,22 @@ public class AuthController {
     // Translates: @api.post("/auth/login")
     @PostMapping("/login")
     public ResponseEntity<?> login(@RequestBody LoginRequest req) {
-        Optional<User> userOpt = userRepository.findByEmail(req.getEmail().toLowerCase());
+        String loginEmail = req.getEmail().toLowerCase();
+        Optional<User> userOpt = userRepository.findByEmail(loginEmail);
 
         if (userOpt.isEmpty() || !passwordEncoder.matches(req.getPassword(), userOpt.get().getPassword())) {
+            logger.warn("Login failed for {}: invalid credentials", loginEmail);
             return ResponseEntity.status(401).body("Invalid email or password");
         }
 
         User user = userOpt.get();
+        LogContext.putUser(user.getEmail(), user.getRole());
+        LogContext.putCafeId(user.getCafeId());
         if (!user.isActive()) {
+            logger.warn("Login blocked for {}: account disabled", loginEmail);
             return ResponseEntity.status(403).body("Account disabled");
         }
+        logger.info("Login successful for {} ({}) role={}", user.getEmail(), user.getName(), user.getRole());
 
         String token = jwtService.generateToken(user.getId(), user.getEmail(), user.getRole());
         ResponseCookie cookie = ResponseCookie.from("access_token", token)
@@ -128,15 +140,14 @@ public class AuthController {
     public ResponseEntity<?> getCurrentUser(HttpServletRequest request) {
         // 1. Get the token from the header (or cookie)
         String authHeader = request.getHeader(HttpHeaders.AUTHORIZATION);
-        logger.info("Me api auth header : {}", authHeader);
         String token = null;
 
         if (authHeader != null && authHeader.startsWith("Bearer ")) {
             token = authHeader.substring(7);
-            logger.info("Token {}", token);
         } else {
             // Fallback: check the cookie if you're using them
             // You can also extract this logic into a utility
+            logger.warn("/me called without a Bearer token");
             return ResponseEntity.status(401).body("No token found");
         }
 
@@ -146,11 +157,15 @@ public class AuthController {
 
             Optional<User> userOpt = userRepository.findByEmail(email);
             if (userOpt.isPresent()) {
+                LogContext.putCafeId(userOpt.get().getCafeId());
+                logger.debug("/me resolved user {}", email);
                 Map<String, Object> response = new HashMap<>();
                 response.put("user", userOpt.get());
                 return ResponseEntity.ok(response);
             }
+            logger.warn("/me: token valid but user {} no longer exists", email);
         } catch (Exception e) {
+            logger.warn("/me: invalid session token ({})", e.getMessage());
             return ResponseEntity.status(401).body("Invalid session");
         }
 
@@ -161,6 +176,7 @@ public class AuthController {
     @PostMapping("/forgot-password")
     public ResponseEntity<?> forgotPassword(@RequestBody Map<String, String> req, HttpServletRequest request) {
         String email = req.get("email");
+        logger.info("Password reset requested for {}", email);
 
         // Lookup target account entries
         User user = userRepository.findByEmail(email).orElse(null);
@@ -168,6 +184,7 @@ public class AuthController {
         // STRICT SECURITY GUARD: Only allow password recovery for CAFE_ADMIN role
         if (user == null || !"CAFE_ADMIN".equalsIgnoreCase(user.getRole())) {
             // Return a vague message so malicious users can't guess valid admin emails
+            logger.warn("Password reset ignored for {}: no CAFE_ADMIN account", email);
             return ResponseEntity.ok(Map.of("message", "If the email matches an Admin account, a verification token has been generated."));
         }
 
@@ -176,6 +193,7 @@ public class AuthController {
             tokenRepository.deleteByEmail(email);
         } catch (Exception e) {
             // Safe to catch if no old tokens exist
+            logger.debug("No previous reset tokens removed for {}: {}", email, e.getMessage());
         }
 
         // Generate a secure unique UUID token
@@ -201,12 +219,9 @@ public class AuthController {
 
         // 2. Build the link dynamically using the client's origin
         String resetLink = origin + "/reset-password?token=" + token;
-        System.out.println("\n====================================================================");
-        System.out.println("⚡ CAFE_CTRL PASSWORD RESET TOOL ⚡");
-        System.out.println("Reset requested for Admin: " + email);
-        System.out.println("Click the link below to set your new credentials:");
-        System.out.println(resetLink);
-        System.out.println("====================================================================\n");
+        logger.info("Password reset token generated for admin {} (valid 15 min)", email);
+        // The link contains a live reset token, so it is only written at DEBUG level
+        logger.debug("Password reset link for {}: {}", email, resetLink);
         Map<String, Object> response = new HashMap<>();
         response.put("message", "Recovery link generated successfully!, Press F12, Click on link");
         response.put("devResetLink", resetLink);
@@ -223,12 +238,14 @@ public class AuthController {
         // Locate the security token configuration row
         PasswordResetToken resetToken = tokenRepository.findByToken(token).orElse(null);
         if (resetToken == null || resetToken.isExpired()) {
+            logger.warn("Password reset failed: token {}", resetToken == null ? "not found" : "expired for " + resetToken.getEmail());
             return ResponseEntity.badRequest().body(Map.of("message", "The verification token is invalid or has expired."));
         }
 
         // Locate matching Admin account
         User user = userRepository.findByEmail(resetToken.getEmail()).orElse(null);
         if (user == null || !"CAFE_ADMIN".equalsIgnoreCase(user.getRole())) {
+            logger.warn("Password reset failed: no CAFE_ADMIN account for {}", resetToken.getEmail());
             return ResponseEntity.badRequest().body(Map.of("message", "Account validation failed."));
         }
 
@@ -238,6 +255,7 @@ public class AuthController {
 
         // Immediately burn the token row so it can never be used twice
         tokenRepository.delete(resetToken);
+        logger.info("Password reset completed for {}", user.getEmail());
 
         return ResponseEntity.ok(Map.of("message", "Password updated successfully! You can now log in."));
     }
@@ -250,6 +268,7 @@ public class AuthController {
         String newPassword = req.get("new_password");
 
         if (newPassword == null || newPassword.isBlank()) {
+            logger.warn("Change password rejected: new password empty");
             return ResponseEntity.badRequest().body(Map.of("message", "New password cannot be empty"));
         }
 
@@ -259,17 +278,20 @@ public class AuthController {
 
         // Safeguard check if the user genuinely doesn't exist in the DB
         if (user == null) {
+            logger.warn("Change password failed: user {} not found", principalIdentifier);
             return ResponseEntity.status(404).body(Map.of("message", "Logged-in user profile not found."));
         }
 
         // Verify the old password matches what's in the DB
         if (!passwordEncoder.matches(oldPassword, user.getPassword())) {
+            logger.warn("Change password rejected for {}: incorrect current password", user.getEmail());
             return ResponseEntity.badRequest().body(Map.of("message", "Incorrect current password"));
         }
 
         // Hash and save the new password
         user.setPassword(passwordEncoder.encode(newPassword));
         userRepository.save(user);
+        logger.info("Password changed for {}", user.getEmail());
 
         return ResponseEntity.ok(Map.of("message", "Password changed successfully"));
     }

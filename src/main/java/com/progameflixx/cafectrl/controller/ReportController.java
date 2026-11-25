@@ -1,11 +1,15 @@
 package com.progameflixx.cafectrl.controller;
 
+import com.progameflixx.cafectrl.logging.LogContext;
+
 import com.progameflixx.cafectrl.entity.*;
 import com.progameflixx.cafectrl.repository.CustomerSessionRepository;
 import com.progameflixx.cafectrl.repository.GameTypeRepository;
 import com.progameflixx.cafectrl.repository.PendingPaymentRepository;
 import com.progameflixx.cafectrl.repository.UserRepository;
 import com.progameflixx.cafectrl.service.BillingService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -28,6 +32,8 @@ import java.util.stream.Collectors;
 @PreAuthorize("hasAnyRole('CAFE_ADMIN', 'OPERATOR')")
 public class ReportController {
 
+    private static final Logger logger = LoggerFactory.getLogger(ReportController.class);
+
     @Autowired
     private CustomerSessionRepository sessionRepository;
 
@@ -44,7 +50,9 @@ public class ReportController {
     private PendingPaymentRepository pendingPaymentRepository;
 
     private String getCafeId(Authentication auth) {
-        return userRepository.findByEmail(auth.getName()).orElseThrow().getCafeId();
+        String cafeId = userRepository.findByEmail(auth.getName()).orElseThrow().getCafeId();
+        LogContext.putCafeId(cafeId);
+        return cafeId;
     }
 
     @GetMapping("/daily")
@@ -205,6 +213,8 @@ public class ReportController {
         resp.put("cancelled_count", cancelledSessions.size()); // Optional: in case you want to show a cancelled counter in UI
         resp.put("sessions", allSessions);
         resp.put("recovered_debts", recoveredDebts);
+        logger.info("Daily report {}: billed={} cancelled={} recoveredDebts={} collected={}",
+                date, billedSessions.size(), cancelledSessions.size(), recoveredDebts.size(), resp.get("total"));
         return resp;
     }
 
@@ -325,6 +335,8 @@ public class ReportController {
         resp.put("by_game_day", byGameDay);   // Fixes Stacked Bar (Games)
         resp.put("by_item_day", byItemDay);   // Fixes Stacked Bar (Items)
         resp.put("pending_total_cleared", monthlyPendingTotalCleared);
+        logger.info("Monthly report {}-{}: sessions={} revenue={} pendingCleared={}",
+                year, month, sessions.size(), resp.get("total"), monthlyPendingTotalCleared);
         // Note: We deliberately do NOT return the "sessions" list here because a
         // whole month of raw session data would make the JSON payload huge and
         // slow down the browser, and the Monthly UI tab doesn't have a "Bills" table anyway.
@@ -381,6 +393,8 @@ public class ReportController {
         paymentSplit.put("card", Math.round(cardTotal * 100.0) / 100.0);
         response.put("payment_split", paymentSplit);
 
+        logger.debug("Dashboard stats: revenue={} billedToday={} activeSessions={}",
+                response.get("total_revenue"), billedToday.size(), activeSessions);
         return response;
     }
 }

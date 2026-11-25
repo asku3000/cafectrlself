@@ -2,6 +2,8 @@ package com.progameflixx.cafectrl.config;
 
 import com.progameflixx.cafectrl.entity.User;
 import com.progameflixx.cafectrl.repository.UserRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.CommandLineRunner;
@@ -12,6 +14,8 @@ import java.time.Instant;
 
 @Component
 public class DataInitializer implements CommandLineRunner {
+
+    private static final Logger logger = LoggerFactory.getLogger(DataInitializer.class);
 
     @Autowired
     private UserRepository userRepository;
@@ -37,7 +41,9 @@ public class DataInitializer implements CommandLineRunner {
             admin.setCreatedAt(Instant.now());
 
             userRepository.save(admin);
-            System.out.println(">>> Super Admin seeded: " + adminEmail);
+            logger.info("Super Admin seeded: {}", adminEmail);
+        } else {
+            logger.info("Super Admin already present: {}", adminEmail);
         }
     }
 }

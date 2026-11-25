@@ -1,5 +1,7 @@
 package com.progameflixx.cafectrl.config;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -14,6 +16,8 @@ import java.util.Collections;
 @Configuration
 public class CorsConfig {
 
+    private static final Logger logger = LoggerFactory.getLogger(CorsConfig.class);
+
     // FIXED: Moved the @Value injection INSIDE the class
     @Value("${frontend.url}")
     private String corsOriginUrl;
@@ -21,6 +25,7 @@ public class CorsConfig {
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration configuration = new CorsConfiguration();
+        logger.info("CORS allowed origin: {}", corsOriginUrl);
 
         // Put your exact frontend URL here, using the injected variable
         configuration.setAllowedOrigins(Collections.singletonList(corsOriginUrl));

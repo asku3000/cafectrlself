@@ -1,10 +1,14 @@
 package com.progameflixx.cafectrl.controller;
 
+import com.progameflixx.cafectrl.logging.LogContext;
+
 import com.progameflixx.cafectrl.entity.AuditLog;
 import com.progameflixx.cafectrl.entity.User;
 import com.progameflixx.cafectrl.repository.AuditLogRepository;
 import com.progameflixx.cafectrl.repository.CustomerSessionRepository;
 import com.progameflixx.cafectrl.repository.UserRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
@@ -28,6 +32,8 @@ import java.util.Map;
 @RequestMapping("/api/audit")
 @PreAuthorize("hasAnyRole('SUPER_ADMIN', 'CAFE_ADMIN', 'OPERATOR')")
 public class AuditController {
+
+    private static final Logger logger = LoggerFactory.getLogger(AuditController.class);
 
     @Autowired
     private AuditLogRepository auditLogRepository;
@@ -53,6 +59,7 @@ public class AuditController {
 
         Pageable pageable = PageRequest.of(0, limit);
         List<AuditLog> rawLogs = auditLogRepository.findAuditsByCafeAndDate(cafeId, start, end, pageable);
+        logger.debug("Fetched {} audit log(s) for {} (limit {})", rawLogs.size(), date, limit);
 
         // Convert the raw logs into a Map to GUARANTEE the JSON keys perfectly match React
         List<Map<String, Object>> formattedLogs = new ArrayList<>();
@@ -91,6 +98,7 @@ public class AuditController {
     // Add this helper method at the bottom of your Controller
     private String getCafeId(Authentication auth) {
         if (auth == null || !auth.isAuthenticated()) {
+            logger.warn("Audit logs requested without authentication");
             throw new RuntimeException("User is not authenticated");
         }
 
@@ -101,6 +109,7 @@ public class AuditController {
         User currentUser = userRepository.findByEmail(username)
                 .orElseThrow(() -> new RuntimeException("User not found"));
 
+        LogContext.putCafeId(currentUser.getCafeId());
         return currentUser.getCafeId();
     }
 }

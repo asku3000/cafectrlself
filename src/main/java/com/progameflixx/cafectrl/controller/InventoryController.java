@@ -1,5 +1,7 @@
 package com.progameflixx.cafectrl.controller;
 
+import com.progameflixx.cafectrl.logging.LogContext;
+
 import com.progameflixx.cafectrl.dto.InventoryRequestDTO;
 import com.progameflixx.cafectrl.entity.InventoryItem;
 import com.progameflixx.cafectrl.entity.ItemRecipe;
@@ -31,21 +33,24 @@ public class InventoryController {
     private UserRepository userRepository;
 
     private String getCafeId(Authentication auth) {
-        return userRepository.findByEmail(auth.getName())
+        String cafeId = userRepository.findByEmail(auth.getName())
                 .orElseThrow(() -> new RuntimeException("User not found"))
                 .getCafeId();
+        LogContext.putCafeId(cafeId);
+        return cafeId;
     }
 
     @GetMapping
     public List<InventoryItem> listInventory(@RequestParam(value = "notInclude", required = false) String notIncludeCategories, Authentication auth) {
-        logger.info("categories not to include {}", notIncludeCategories);
+        List<InventoryItem> items;
         if (notIncludeCategories == null || notIncludeCategories.isBlank()) {
-            return getSortedBasedOnCategory(inventoryRepository.findByCafeId(getCafeId(auth)));
+            items = getSortedBasedOnCategory(inventoryRepository.findByCafeId(getCafeId(auth)));
         } else {
             Collection<String> notInclude = List.of(notIncludeCategories.split(","));
-            logger.info("notinclude list {}", notInclude);
-            return getSortedBasedOnCategory(inventoryRepository.findByCafeIdAndCategoryNotIn(getCafeId(auth), notInclude));
+            items = getSortedBasedOnCategory(inventoryRepository.findByCafeIdAndCategoryNotIn(getCafeId(auth), notInclude));
         }
+        logger.debug("Listed {} inventory item(s), excluding categories {}", items.size(), notIncludeCategories);
+        return items;
     }
 
     public List<InventoryItem> getSortedBasedOnCategory(List<InventoryItem> list){// 1. Create a custom Comparator to sort by the last word of the name
@@ -82,7 +87,7 @@ public class InventoryController {
     @PostMapping
     public InventoryItem createInventory(@RequestBody InventoryRequestDTO request, Authentication auth) {
         try {
-            logger.info("Inventory Item: {}", request);
+            logger.info("Create inventory item requested: {}", request);
             // 1. Create the base item
             InventoryItem newItem = new InventoryItem();
             newItem.setName(request.getName());
@@ -118,10 +123,13 @@ public class InventoryController {
 
             // 3. Save to database (CascadeType.ALL will automatically save the recipes too!)
             inventoryRepository.save(newItem);
+            logger.info("Inventory item created: id={} name='{}' category={} price={} trackable={} stock={} ingredients={}",
+                    newItem.getId(), newItem.getName(), newItem.getCategory(), newItem.getPrice(), newItem.getIsTrackable(),
+                    newItem.getStock(), newItem.getIngredients() != null ? newItem.getIngredients().size() : 0);
 
             return newItem;
         } catch (Exception e) {
-            logger.error("Error occurred", e);
+            logger.error("Failed to create inventory item '{}': {}", request.getName(), e.getMessage(), e);
             return null;
         }
     }
@@ -130,8 +138,11 @@ public class InventoryController {
     public ResponseEntity<?> updateInventory(@PathVariable String iid, @RequestBody InventoryItem updates, Authentication auth) {
         InventoryItem existing = inventoryRepository.findById(iid).orElse(null);
         if (existing == null || !existing.getCafeId().equals(getCafeId(auth))) {
+            logger.warn("Update inventory: item {} not found in this cafe", iid);
             return ResponseEntity.notFound().build();
         }
+        logger.info("Update inventory item {} ('{}'): before price={} stock={} category={} trackable={}",
+                iid, existing.getName(), existing.getPrice(), existing.getStock(), existing.getCategory(), existing.getIsTrackable());
 
         // 1. Map the basic fields
         if (updates.getName() != null) existing.setName(updates.getName());
@@ -166,16 +177,22 @@ public class InventoryController {
             }
         }
 
-        return ResponseEntity.ok(inventoryRepository.save(existing));
+        InventoryItem saved = inventoryRepository.save(existing);
+        logger.info("Inventory item {} updated: name='{}' price={} stock={} category={} trackable={} ingredients={}",
+                iid, saved.getName(), saved.getPrice(), saved.getStock(), saved.getCategory(), saved.getIsTrackable(),
+                saved.getIngredients() != null ? saved.getIngredients().size() : 0);
+        return ResponseEntity.ok(saved);
     }
 
     @DeleteMapping("/{iid}")
     public ResponseEntity<?> deleteInventory(@PathVariable String iid, Authentication auth) {
         InventoryItem existing = inventoryRepository.findById(iid).orElse(null);
         if (existing == null || !existing.getCafeId().equals(getCafeId(auth))) {
+            logger.warn("Delete inventory: item {} not found in this cafe", iid);
             return ResponseEntity.notFound().build();
         }
         inventoryRepository.delete(existing);
+        logger.info("Inventory item deleted: id={} name='{}'", iid, existing.getName());
         return ResponseEntity.ok(Map.of("ok", true));
     }
 }

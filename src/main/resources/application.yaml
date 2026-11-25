@@ -35,10 +35,17 @@ spring:
     name: bookings
 
 logging:
+  # Every log line carries the request id, logged-in user, role and cafe (set via MDC),
+  # e.g.  INFO [req=a1b2c3d4e5f6 user=owner@cafe.com role=CAFE_ADMIN cafe=7f3...] ...
+  pattern:
+    level: "%5p [req=%X{reqId:-} user=%X{user:-} role=%X{role:-} cafe=%X{cafeId:-}]"
   level:
-    org.springframework: DEBUG
-    org.hibernate.SQL: DEBUG
-    org.hibernate.type.descriptor.sql.BasicBinder: TRACE
+    root: INFO
+    com.progameflixx.cafectrl: ${LOG_LEVEL_APP:INFO}
+    # Framework / SQL noise is off by default; raise via env vars when debugging, e.g. LOG_LEVEL_SQL=DEBUG
+    org.springframework: ${LOG_LEVEL_SPRING:INFO}
+    org.hibernate.SQL: ${LOG_LEVEL_SQL:INFO}
+    org.hibernate.type.descriptor.sql.BasicBinder: ${LOG_LEVEL_SQL_PARAMS:INFO}
 
 # Optional - if you plan login with JWT later
 jwt:
