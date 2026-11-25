@@ -5,6 +5,8 @@ import com.progameflixx.cafectrl.entity.GameSession;
 import com.progameflixx.cafectrl.entity.GameSessionItem;
 import com.progameflixx.cafectrl.entity.RateCard;
 import com.progameflixx.cafectrl.repository.RateCardRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
@@ -15,6 +17,8 @@ import java.util.*;
 @Service
 public class BillingService {
 
+    private static final Logger logger = LoggerFactory.getLogger(BillingService.class);
+
     @Autowired
     private RateCardRepository rateCardRepository;
 
@@ -24,9 +28,14 @@ public class BillingService {
         List<Map<String, Object>> gamesBreakdown = new ArrayList<>();
         double gamesTotal = 0.0;
         double itemsTotal = 0.0;
+        logger.debug("Computing bill for session {} ({} game(s))", session.getId(), session.getGames().size());
 
         for (GameSession g : session.getGames()) {
             RateCard rc = rateCardRepository.findById(g.getRateCardId()).orElse(null);
+            if (rc == null) {
+                logger.warn("Session {} game {} ({}): rate card {} not found, game will be billed 0",
+                        session.getId(), g.getId(), g.getResourceName(), g.getRateCardId());
+            }
             LocalDateTime start = g.getStartTime();
             LocalDateTime end = g.getEndTime() != null ? g.getEndTime() : LocalDateTime.now();
             int playerCount = g.getPlayerCount() != null ? g.getPlayerCount() : 1;
@@ -78,6 +87,8 @@ public class BillingService {
         result.put("adjustment", adjustment);
         result.put("grand_total", grandTotal);
 
+        logger.debug("Bill computed for session {}: games={} items={} adjustment={} grandTotal={}",
+                session.getId(), result.get("games_total"), result.get("items_total"), adjustment, grandTotal);
         return result;
     }
 
@@ -110,6 +121,8 @@ public class BillingService {
         // Fallbacks to prevent 0.0 bills if someone picks an unconfigured player count
         if (rateInterval == 0.0 && rate60Min == 0.0) {
             // Default to 1-player rates if exact match fails
+            logger.warn("Rate card {} has no price for {} player(s) on {}; falling back to 1-player rates",
+                    card.getId(), playerCount, weekday);
             rateInterval = extractPrice(card, weekday, intervalMinutes, 1);
             rate60Min = extractPrice(card, weekday, 60, 1);
         }
@@ -123,6 +136,12 @@ public class BillingService {
 
         // 6. Calculate total charge (Player count is inherently handled by the exact JSON rate)
         double totalCharge = (fullHours * rate60Min) + (remainderBlocks * rateInterval);
+        if (totalCharge == 0.0) {
+            logger.warn("Rate card {} produced a 0 charge for {} min on {} ({} player(s)) - check pricing config",
+                    card.getId(), totalMinutes, weekday, playerCount);
+        }
+        logger.debug("Game charge: rateCard={} minutes={} grace={} interval={} blocks={} (fullHours={}, remainder={}) amount={}",
+                card.getId(), totalMinutes, graceMinutes, intervalMinutes, totalBlocks, fullHours, remainderBlocks, totalCharge);
 
         // 7. Prepare the detailed payload for the React UI receipt
         Map<String, Object> result = new HashMap<>();
@@ -229,7 +248,10 @@ public class BillingService {
         RateCard card = rateCardRepository.findById(g.getRateCardId())
                 .orElse(null);
 
-        if (card == null) return Map.of("amount", 0.0);
+        if (card == null) {
+            logger.warn("Game {} ({}): rate card {} not found, charge is 0", g.getId(), g.getResourceName(), g.getRateCardId());
+            return Map.of("amount", 0.0);
+        }
 
         // 2. Call your existing 4-parameter logic that returns the Map
         return computeGameCharge(

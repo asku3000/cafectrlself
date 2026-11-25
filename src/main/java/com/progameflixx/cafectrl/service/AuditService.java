@@ -4,6 +4,8 @@ import com.progameflixx.cafectrl.entity.AuditLog;
 import com.progameflixx.cafectrl.entity.User;
 import com.progameflixx.cafectrl.repository.AuditLogRepository;
 import com.progameflixx.cafectrl.repository.UserRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.core.Authentication;
 import org.springframework.stereotype.Service;
@@ -13,6 +15,8 @@ import java.util.Map;
 @Service
 public class AuditService {
 
+    private static final Logger logger = LoggerFactory.getLogger(AuditService.class);
+
     @Autowired
     private AuditLogRepository auditLogRepository;
 
@@ -21,7 +25,10 @@ public class AuditService {
 
     public void log(Authentication auth, String action, String target, Map<String, Object> meta) {
         User user = userRepository.findByEmail(auth.getName()).orElse(null);
-        if (user == null) return;
+        if (user == null) {
+            logger.warn("Audit '{}' on target {} skipped: user {} not found", action, target, auth.getName());
+            return;
+        }
 
         AuditLog log = new AuditLog();
         log.setCafeId(user.getCafeId());
@@ -33,5 +40,6 @@ public class AuditService {
         log.setMeta(meta);
 
         auditLogRepository.save(log);
+        logger.debug("Audit recorded: action={} target={} by {}", action, target, user.getName());
     }
 }

@@ -1,5 +1,7 @@
 package com.progameflixx.cafectrl.controller;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.*;
@@ -11,6 +13,8 @@ import java.util.Map;
 @RestController
 @RequestMapping("/api/super-admin")
 public class SuperAdminController {
+
+    private static final Logger logger = LoggerFactory.getLogger(SuperAdminController.class);
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
@@ -41,6 +45,7 @@ public class SuperAdminController {
             cafe.put("sessions_count", sessionsCount != null ? sessionsCount : 0);
         }
 
+        logger.info("Super admin listed {} cafe(s)", cafes.size());
         return cafes;
     }
 
@@ -67,6 +72,7 @@ public class SuperAdminController {
         // Handle null in case there are 0 billed sessions yet
         stats.put("total_revenue", totalRevenue != null ? totalRevenue : 0.0);
 
+        logger.info("Super admin stats: {}", stats);
         return stats;
     }
 }

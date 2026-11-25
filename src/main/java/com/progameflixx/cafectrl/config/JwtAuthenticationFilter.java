@@ -1,5 +1,6 @@
 package com.progameflixx.cafectrl.config;
 
+import com.progameflixx.cafectrl.logging.LogContext;
 import io.jsonwebtoken.Claims;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
@@ -32,11 +33,18 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
         String token = extractToken(request);
 
-        // Inside doFilterInternal...
-        if (token != null && jwtService.isTokenValid(token)) {
+        if (token == null) {
+            logger.debug("No JWT on request {} {}", request.getMethod(), request.getRequestURI());
+        } else if (!jwtService.isTokenValid(token)) {
+            logger.warn("Invalid or expired JWT on request {} {}", request.getMethod(), request.getRequestURI());
+        } else {
             Claims claims = jwtService.extractAllClaims(token);
             String userId = claims.getSubject();
             String role = claims.get("role", String.class); // Extract the role from the token
+
+            // Make the caller identifiable on every subsequent log line of this request
+            LogContext.putUser(userId, role);
+            logger.debug("Authenticated request via JWT");
 
             // Spring Security expects roles to be formatted like "ROLE_OPERATOR"
             String springRole = "ROLE_" + role.toUpperCase();

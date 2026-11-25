@@ -1,7 +1,11 @@
 package com.progameflixx.cafectrl.controller;
 
+import com.progameflixx.cafectrl.logging.LogContext;
+
 import com.progameflixx.cafectrl.entity.*;
 import com.progameflixx.cafectrl.repository.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -21,6 +25,8 @@ import java.util.Map;
 @RequestMapping("/api")
 @PreAuthorize("hasRole('CAFE_ADMIN')")
 public class CafeAdminController {
+
+    private static final Logger logger = LoggerFactory.getLogger(CafeAdminController.class);
 
     @Autowired
     private GameTypeRepository gameTypeRepository;
@@ -44,7 +50,9 @@ public class CafeAdminController {
     // Helper to get cafeId from the logged-in admin
     private String getCafeId(Authentication auth) {
         // Assuming auth.getName() returns the user's email or ID that matches your User entity primary key
-        return userRepository.findByEmail(auth.getName()).orElseThrow().getCafeId();
+        String cafeId = userRepository.findByEmail(auth.getName()).orElseThrow().getCafeId();
+        LogContext.putCafeId(cafeId);
+        return cafeId;
     }
 
     // --- CAFE PROFILE (The Missing APIs) ---
@@ -53,9 +61,13 @@ public class CafeAdminController {
     @PreAuthorize("hasAnyRole('CAFE_ADMIN', 'OPERATOR')")
     public ResponseEntity<?> getMyCafe(Authentication auth) {
         String cafeId = getCafeId(auth);
+        logger.debug("Fetching cafe profile");
         return cafeRepository.findById(cafeId)
                 .map(ResponseEntity::ok)
-                .orElse(ResponseEntity.notFound().build());
+                .orElseGet(() -> {
+                    logger.warn("Cafe profile {} not found", cafeId);
+                    return ResponseEntity.notFound().build();
+                });
     }
 
     @PutMapping("/cafe")
@@ -64,6 +76,7 @@ public class CafeAdminController {
 
         Cafe existingCafe = cafeRepository.findById(cafeId).orElse(null);
         if (existingCafe == null) {
+            logger.warn("Update cafe: cafe {} not found", cafeId);
             return ResponseEntity.notFound().build();
         }
 
@@ -74,6 +87,8 @@ public class CafeAdminController {
         existingCafe.setSetupComplete(updates.isSetupComplete());
 
         cafeRepository.save(existingCafe);
+        logger.info("Cafe profile updated: name='{}' phone={} setupComplete={}",
+                existingCafe.getName(), existingCafe.getPhone(), existingCafe.isSetupComplete());
         return ResponseEntity.ok(existingCafe);
     }
 
@@ -81,7 +96,9 @@ public class CafeAdminController {
 
     @GetMapping("/staff")
     public List<User> listStaff(Authentication auth) {
-        return userRepository.findByCafeIdAndRole(getCafeId(auth), "operator");
+        List<User> staff = userRepository.findByCafeIdAndRole(getCafeId(auth), "operator");
+        logger.debug("Listed {} staff member(s)", staff.size());
+        return staff;
     }
 
     @PostMapping("/staff")
@@ -90,11 +107,15 @@ public class CafeAdminController {
         staffReq.setRole("OPERATOR");
         staffReq.setPassword(passwordEncoder.encode(staffReq.getPassword()));
         staffReq.setActive(true);
-        return userRepository.save(staffReq);
+        User created = userRepository.save(staffReq);
+        logger.info("Operator created: id={} email={} name='{}' permissions={}",
+                created.getId(), created.getEmail(), created.getName(), created.getPermissions());
+        return created;
     }
 
     @DeleteMapping("/staff/{uid}")
     public ResponseEntity<?> deleteOperator(@PathVariable String uid, Authentication auth) {
+        logger.info("Deleting operator {}", uid);
         userRepository.deleteById(uid);
         return ResponseEntity.ok().build();
     }
@@ -105,8 +126,10 @@ public class CafeAdminController {
     public ResponseEntity<?> updateStaff(@PathVariable String id, @RequestBody User req) {
 
         // 1. Find the existing operator
+        logger.info("Update operator {} requested", id);
         User op = userRepository.findById(id).orElse(null);
         if (op == null) {
+            logger.warn("Update operator: {} not found", id);
             return ResponseEntity.status(404).body(Map.of("message", "Operator not found"));
         }
 
@@ -114,6 +137,7 @@ public class CafeAdminController {
         if (req.getEmail() != null && !req.getEmail().equalsIgnoreCase(op.getEmail())) {
             boolean emailExists = userRepository.existsByEmailAndIdNot(req.getEmail(), id);
             if (emailExists) {
+                logger.warn("Update operator {} rejected: email {} already exists", id, req.getEmail());
                 return ResponseEntity.badRequest().body(Map.of("message", "Email already exists"));
             }
             op.setEmail(req.getEmail());
@@ -132,7 +156,11 @@ public class CafeAdminController {
             op.getPermissions().addAll(req.getPermissions());
         }
         op.setActive(req.isActive());
-        return ResponseEntity.ok(userRepository.save(op));
+        User saved = userRepository.save(op);
+        logger.info("Operator {} updated: email={} name='{}' active={} permissions={} passwordChanged={}",
+                id, saved.getEmail(), saved.getName(), saved.isActive(), saved.getPermissions(),
+                req.getPassword() != null && !req.getPassword().isBlank());
+        return ResponseEntity.ok(saved);
     }
 
     // --- GAME TYPES (PC, PS5, etc.) ---
@@ -146,7 +174,9 @@ public class CafeAdminController {
     @PostMapping("/game-types")
     public GameType createGameType(@RequestBody GameType gt, Authentication auth) {
         gt.setCafeId(getCafeId(auth));
-        return gameTypeRepository.save(gt);
+        GameType saved = gameTypeRepository.save(gt);
+        logger.info("Game type saved: id={} name='{}'", saved.getId(), saved.getName());
+        return saved;
     }
 
     @DeleteMapping("/game-types/{gid}")
@@ -157,10 +187,12 @@ public class CafeAdminController {
 
         // Security Check: Make sure it exists AND belongs to this specific cafe
         if (gt == null || !gt.getCafeId().equals(cafeId)) {
+            logger.warn("Delete game type: {} not found in this cafe", gid);
             return ResponseEntity.notFound().build();
         }
 
         gameTypeRepository.delete(gt);
+        logger.info("Game type deleted: id={} name='{}'", gid, gt.getName());
         return ResponseEntity.ok(Map.of("ok", true)); // Matches Python's {"ok": True}
     }
 
@@ -175,7 +207,9 @@ public class CafeAdminController {
     @PostMapping("/rate-cards")
     public RateCard createRateCard(@RequestBody RateCard rc, Authentication auth) {
         rc.setCafeId(getCafeId(auth));
-        return rateCardRepository.save(rc);
+        RateCard saved = rateCardRepository.save(rc);
+        logger.info("Rate card saved: id={} grace={} interval={}", saved.getId(), saved.getGraceMinutes(), saved.getBillingIntervalMinutes());
+        return saved;
     }
 
     @DeleteMapping("/rate-cards/{rid}")
@@ -184,10 +218,12 @@ public class CafeAdminController {
 
         RateCard rc = rateCardRepository.findById(rid).orElse(null);
         if (rc == null || !rc.getCafeId().equals(cafeId)) {
+            logger.warn("Delete rate card: {} not found in this cafe", rid);
             return ResponseEntity.notFound().build();
         }
 
         rateCardRepository.delete(rc);
+        logger.info("Rate card deleted: id={}", rid);
         return ResponseEntity.ok(Map.of("ok", true));
     }
 
@@ -230,13 +266,17 @@ public class CafeAdminController {
             response.add(rMap);
         }
 
+        logger.debug("Listed {} resource(s), {} currently in use", resources.size(), activeMap.size());
         return response;
     }
 
     @PostMapping("/resources")
     public Resource createResource(@RequestBody Resource res, Authentication auth) {
         res.setCafeId(getCafeId(auth));
-        return resourceRepository.save(res);
+        Resource saved = resourceRepository.save(res);
+        logger.info("Resource saved: id={} name='{}' gameType={} rateCard={}",
+                saved.getId(), saved.getName(), saved.getGameTypeId(), saved.getRateCardId());
+        return saved;
     }
 
     @DeleteMapping("/resources/{rid}")
@@ -245,10 +285,12 @@ public class CafeAdminController {
 
         Resource res = resourceRepository.findById(rid).orElse(null);
         if (res == null || !res.getCafeId().equals(cafeId)) {
+            logger.warn("Delete resource: {} not found in this cafe", rid);
             return ResponseEntity.notFound().build();
         }
 
         resourceRepository.delete(res);
+        logger.info("Resource deleted: id={} name='{}'", rid, res.getName());
         return ResponseEntity.ok(Map.of("ok", true));
     }
 
@@ -266,7 +308,9 @@ public class CafeAdminController {
     @PostMapping("/accessories")
     public Accessory createAccessory(@RequestBody Accessory acc, Authentication auth) {
         acc.setCafeId(getCafeId(auth));
-        return accessoryRepository.save(acc);
+        Accessory saved = accessoryRepository.save(acc);
+        logger.info("Accessory created: id={} name='{}' price={}", saved.getId(), saved.getName(), saved.getPrice());
+        return saved;
     }
 
     @PutMapping("/accessories/{aid}")
@@ -275,6 +319,7 @@ public class CafeAdminController {
 
         Accessory existingAcc = accessoryRepository.findById(aid).orElse(null);
         if (existingAcc == null || !existingAcc.getCafeId().equals(cafeId)) {
+            logger.warn("Update accessory: {} not found in this cafe", aid);
             return ResponseEntity.notFound().build();
         }
 
@@ -283,6 +328,7 @@ public class CafeAdminController {
         if (updates.getPrice() != null) existingAcc.setPrice(updates.getPrice());
 
         accessoryRepository.save(existingAcc);
+        logger.info("Accessory updated: id={} name='{}' price={}", aid, existingAcc.getName(), existingAcc.getPrice());
         return ResponseEntity.ok(existingAcc);
     }
 
@@ -292,10 +338,12 @@ public class CafeAdminController {
 
         Accessory acc = accessoryRepository.findById(aid).orElse(null);
         if (acc == null || !acc.getCafeId().equals(cafeId)) {
+            logger.warn("Delete accessory: {} not found in this cafe", aid);
             return ResponseEntity.notFound().build();
         }
 
         accessoryRepository.delete(acc);
+        logger.info("Accessory deleted: id={} name='{}'", aid, acc.getName());
         return ResponseEntity.ok(Map.of("ok", true));
     }
 }

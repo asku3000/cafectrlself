@@ -1,10 +1,14 @@
 package com.progameflixx.cafectrl.controller;
 
+import com.progameflixx.cafectrl.logging.LogContext;
+
 import com.progameflixx.cafectrl.dto.CustomerProfileView;
 import com.progameflixx.cafectrl.entity.CustomerSession;
 import com.progameflixx.cafectrl.repository.CustomerSessionRepository;
 import com.progameflixx.cafectrl.repository.PendingPaymentRepository;
 import com.progameflixx.cafectrl.repository.UserRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
@@ -25,6 +29,8 @@ import java.util.stream.Collectors;
 @RequestMapping("/api/customers")
 @CrossOrigin(origins = "${frontend.url}", allowCredentials = "true")
 public class CustomerController {
+
+    private static final Logger logger = LoggerFactory.getLogger(CustomerController.class);
 
     @Autowired
     private CustomerSessionRepository sessionRepository;
@@ -79,6 +85,8 @@ public class CustomerController {
         Pageable paging = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "lastVisited"));
 
         Page<CustomerProfileView> pageResult = sessionRepository.getGroupedCustomerProfiles(cafeId, paging);
+        logger.debug("Customer directory page {} (size {}): {} of {} profile(s)",
+                page, size, pageResult.getNumberOfElements(), pageResult.getTotalElements());
 
         Map<String, Object> response = new HashMap<>();
         response.put("data", pageResult.getContent());
@@ -107,6 +115,7 @@ public class CustomerController {
 
         // Sort timeline by newest session entries first
         history.sort((a, b) -> b.getCreatedAt().compareTo(a.getCreatedAt()));
+        logger.debug("Customer history for '{}' (phone filter: {}): {} session(s)", name, phone != null && !phone.isBlank(), history.size());
         return ResponseEntity.ok(history);
     }
 
@@ -115,10 +124,14 @@ public class CustomerController {
     @PreAuthorize("hasAnyRole('CAFE_ADMIN', 'OPERATOR')")
     public ResponseEntity<?> getPendingBalances(Authentication auth) {
         String cafeId = getCafeId(auth);
-        return ResponseEntity.ok(pendingPaymentRepository.findByCafeIdAndStatus(cafeId, "PENDING"));
+        var pending = pendingPaymentRepository.findByCafeIdAndStatus(cafeId, "PENDING");
+        logger.debug("Fetched {} pending balance(s)", pending.size());
+        return ResponseEntity.ok(pending);
     }
 
     private String getCafeId(Authentication auth) {
-        return userRepository.findByEmail(auth.getName()).orElseThrow().getCafeId();
+        String cafeId = userRepository.findByEmail(auth.getName()).orElseThrow().getCafeId();
+        LogContext.putCafeId(cafeId);
+        return cafeId;
     }
 }
