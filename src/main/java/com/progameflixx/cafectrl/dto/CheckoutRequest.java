@@ -16,4 +16,8 @@ public class CheckoutRequest {
     @JsonProperty("manual_billed_at")
     private LocalDateTime manualBilledAt;
 
+    /** Amount (paise) to pay from the session's tagged membership card. Null/0 = don't use the card. */
+    @JsonProperty("membership_amount_paise")
+    private Long membershipAmountPaise;
+
 }

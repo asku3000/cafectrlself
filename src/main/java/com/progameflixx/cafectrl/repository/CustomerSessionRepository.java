@@ -17,6 +17,13 @@ import java.util.List;
 public interface CustomerSessionRepository extends JpaRepository<CustomerSession, String> {
     List<CustomerSession> findByCafeIdAndStatus(String cafeId, String status);
 
+    /** Row-locks the session for checkout / reopen / void so two requests can't bill it at once. */
+    @org.springframework.data.jpa.repository.Lock(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT s FROM CustomerSession s WHERE s.id = :id")
+    java.util.Optional<CustomerSession> findForUpdate(@Param("id") String id);
+
+    List<CustomerSession> findByCafeIdAndMembershipCardIdOrderByCreatedAtDesc(String cafeId, String membershipCardId);
+
     // Find all billed sessions for a cafe within a time range
     @Query("SELECT s FROM CustomerSession s WHERE s.cafeId = :cafeId " +
             "AND s.status = 'billed' " +

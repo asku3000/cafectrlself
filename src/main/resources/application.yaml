@@ -31,6 +31,14 @@ spring:
     init:
       mode: always
 
+  # Flyway owns the membership tables (db/migration). Existing tables are still managed by
+  # ddl-auto above. On a database that already has tables but no flyway history, Flyway records
+  # a baseline at version 0 and then applies V1+, so nothing pre-existing is touched.
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+    baseline-version: 0
+
   application:
     name: bookings
 

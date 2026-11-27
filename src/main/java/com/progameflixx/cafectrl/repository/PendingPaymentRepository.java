@@ -9,6 +9,8 @@ import java.util.List;
 @Repository
 public interface PendingPaymentRepository extends JpaRepository<PendingPayment, Long> {
 
+    List<PendingPayment> findBySessionId(String sessionId);
+
     // Finds all pending or cleared debts for the cafe
     List<PendingPayment> findByCafeIdAndStatus(String cafeId, String status);
 

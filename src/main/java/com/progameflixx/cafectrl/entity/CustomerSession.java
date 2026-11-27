@@ -45,7 +45,7 @@ public class CustomerSession {
     @Column(name = "payments", columnDefinition = "json")
     private List<PaymentSplit> payments = new java.util.ArrayList<>();
 
-    private String status = "active"; // "active" | "billed"
+    private String status = "active"; // "active" | "billed" | "cancelled" | "voided"
 
     @Column(name = "bill_total")
     @JsonProperty("bill_total")
@@ -90,6 +90,23 @@ public class CustomerSession {
     private java.util.Map<String, Object> billBreakdown;
 
     private String notes;
+
+    // Optional prepaid membership card tagged to this session (null = non-member flow, unchanged).
+    // Column is added by ddl-auto like the rest of this table; it is nullable so existing rows are untouched.
+    @Column(name = "membership_card_id", length = 36)
+    @JsonProperty("membership_card_id")
+    private String membershipCardId;
+
+    // Incremented on every checkout; a bill that is reopened and billed again gets a new number, which keys
+    // its card debit (BILL:<session>:<seq>) so retries never double-deduct. Null on older rows = 0.
+    @Column(name = "bill_seq")
+    @JsonProperty("bill_seq")
+    private Integer billSeq;
+
+    // Live view of the tagged card (holder, balance, expiry, warnings) for the UI; never stored.
+    @Transient
+    @JsonProperty("membership_card")
+    private com.progameflixx.cafectrl.dto.MembershipCardView membershipCard;
 
     // Helper method to keep JPA synchronization perfect
     public void addGame(GameSession game) {

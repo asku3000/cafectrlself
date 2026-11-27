@@ -25,6 +25,14 @@ public class BillingService {
     private static final String[] WEEKDAYS = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"};
 
     public Map<String, Object> computeSessionBill(CustomerSession session) {
+        return computeSessionBill(session, null);
+    }
+
+    /**
+     * Same calculation; games that are still running are priced up to {@code openGamesEndOverride} instead of
+     * "now" when given (backdated bill preview). Nothing on the session is modified.
+     */
+    public Map<String, Object> computeSessionBill(CustomerSession session, LocalDateTime openGamesEndOverride) {
         List<Map<String, Object>> gamesBreakdown = new ArrayList<>();
         double gamesTotal = 0.0;
         double itemsTotal = 0.0;
@@ -37,7 +45,8 @@ public class BillingService {
                         session.getId(), g.getId(), g.getResourceName(), g.getRateCardId());
             }
             LocalDateTime start = g.getStartTime();
-            LocalDateTime end = g.getEndTime() != null ? g.getEndTime() : LocalDateTime.now();
+            LocalDateTime end = g.getEndTime() != null ? g.getEndTime()
+                    : (openGamesEndOverride != null ? openGamesEndOverride : LocalDateTime.now());
             int playerCount = g.getPlayerCount() != null ? g.getPlayerCount() : 1;
 
             Map<String, Object> charge = computeGameCharge(rc, start, end, playerCount);
