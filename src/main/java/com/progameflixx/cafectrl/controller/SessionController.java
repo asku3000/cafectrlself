@@ -2,6 +2,10 @@ package com.progameflixx.cafectrl.controller;
 
 // --- ALL REQUIRED IMPORTS ---
 
+import com.progameflixx.cafectrl.audit.AuditActions;
+import com.progameflixx.cafectrl.audit.AuditFormat;
+import com.progameflixx.cafectrl.audit.AuditRecord;
+import com.progameflixx.cafectrl.audit.Audited;
 import com.progameflixx.cafectrl.dto.CheckoutRequest;
 import com.progameflixx.cafectrl.entity.*;
 import com.progameflixx.cafectrl.logging.LogContext;
@@ -54,13 +58,16 @@ public class SessionController {
     private PendingPaymentRepository pendingPaymentRepository;
 
     @Autowired
-    private com.progameflixx.cafectrl.service.AuditService auditService;
+    private com.progameflixx.cafectrl.audit.AuditService auditService;
 
     @Autowired
     private com.progameflixx.cafectrl.service.SessionMembershipService sessionMembershipService;
 
     @Autowired
     private com.progameflixx.cafectrl.service.SessionBillingService sessionBillingService;
+
+    @Autowired
+    private MembershipCardRepository membershipCardRepository;
 
     @Autowired
     private com.progameflixx.cafectrl.service.CurrentUserService currentUserService;
@@ -79,6 +86,7 @@ public class SessionController {
     }
 
     @PostMapping
+    @Audited(action = AuditActions.SESSION_STARTED, entityType = AuditActions.ENTITY_SESSION)
     public ResponseEntity<?> startSession(@RequestBody Map<String, Object> payload, Authentication auth) {
         String cafeId = getCafeId(auth);
         String resourceId = (String) payload.get("resource_id");
@@ -131,12 +139,17 @@ public class SessionController {
         logger.info("Session {} started for customer '{}' on {} (game {}, players={}, start={})",
                 saved.getId(), saved.getCustomerName(), game.getResourceName(), game.getId(),
                 game.getPlayerCount(), game.getStartTime());
-        // RECORD AUDIT
-        Map<String, Object> startMeta = new java.util.HashMap<>();
-        startMeta.put("customer", saved.getCustomerName());
-        startMeta.put("resource", game.getResourceName());
-        if (taggedCard != null) startMeta.put("membership_card", taggedCard.getCardNumber());
-        auditService.log(auth, "SESSION_START", saved.getId(), startMeta);
+        auditService.record(AuditRecord.of(AuditActions.SESSION_STARTED).entity(AuditActions.ENTITY_SESSION, saved.getId())
+                .description("Started session for " + saved.getCustomerName() + " on " + game.getResourceName()
+                        + " (" + game.getPlayerCount() + " player" + (game.getPlayerCount() == 1 ? "" : "s") + ")"
+                        + (taggedCard != null ? " with card " + taggedCard.getCardNumber() : ""))
+                .detail("customer_name", saved.getCustomerName())
+                .detail("customer_phone", saved.getCustomerPhone())
+                .detail("resource", game.getResourceName())
+                .detail("resource_id", game.getResourceId())
+                .detail("player_count", game.getPlayerCount())
+                .detail("start_time", game.getStartTime())
+                .detail("membership_card", taggedCard != null ? taggedCard.getCardNumber() : null));
         return ResponseEntity.ok(sessionMembershipService.attachCard(saved));
     }
 
@@ -172,51 +185,33 @@ public class SessionController {
 
     // --- CHECKOUT (one transaction: bill + optional membership card payment) ---
     @PostMapping("/{sid}/checkout")
+    @Audited(action = AuditActions.BILL_CREATED, entityType = AuditActions.ENTITY_SESSION, entityIdParam = "sid")
     public ResponseEntity<?> checkout(@PathVariable String sid, @RequestBody CheckoutRequest req, Authentication auth) {
         User actor = currentUserService.require(auth);
         SessionBillingService.CheckoutResult result = sessionBillingService.checkout(actor, sid, req);
         CustomerSession saved = result.session();
-        // RECORD AUDIT
-        Map<String, Object> meta = new java.util.HashMap<>();
-        meta.put("customer", saved.getCustomerName());
-        meta.put("total", saved.getBillTotal());
-        meta.put("payments", saved.getPayments());
-        if (result.cardPayment() != null) meta.put("membership_card", result.cardPayment().getCardNumber());
-        auditService.log(auth, "SESSION_CHECKOUT", saved.getId(), meta);
+        // Audit entries (bill, discount, payments, card deduction) were written inside the checkout transaction
         return ResponseEntity.ok(sessionMembershipService.attachCard(saved));
     }
 
     // --- REOPEN A BILLED SESSION (admin): reverses card payments, voids unpaid debts, back to unbilled ---
     @PostMapping("/{sid}/reopen")
     @PreAuthorize("hasRole('CAFE_ADMIN')")
+    @Audited(action = AuditActions.BILL_REOPENED, entityType = AuditActions.ENTITY_SESSION, entityIdParam = "sid")
     public ResponseEntity<?> reopenBill(@PathVariable String sid, @RequestBody Map<String, String> body, Authentication auth) {
         User admin = currentUserService.require(auth);
         SessionBillingService.UndoResult r = sessionBillingService.reopen(admin, sid, body.get("reason"));
-        auditService.log(auth, "SESSION_BILL_REOPEN", sid, undoMeta(r, body.get("reason")));
         return ResponseEntity.ok(sessionMembershipService.attachCard(r.session()));
     }
 
     // --- VOID A BILLED SESSION (admin): reverses card payments, voids unpaid debts, out of revenue ---
     @PostMapping("/{sid}/void")
     @PreAuthorize("hasRole('CAFE_ADMIN')")
+    @Audited(action = AuditActions.BILL_VOIDED, entityType = AuditActions.ENTITY_SESSION, entityIdParam = "sid")
     public ResponseEntity<?> voidBill(@PathVariable String sid, @RequestBody Map<String, String> body, Authentication auth) {
         User admin = currentUserService.require(auth);
         SessionBillingService.UndoResult r = sessionBillingService.voidBill(admin, sid, body.get("reason"));
-        auditService.log(auth, "SESSION_BILL_VOID", sid, undoMeta(r, body.get("reason")));
         return ResponseEntity.ok(sessionMembershipService.attachCard(r.session()));
-    }
-
-    private static Map<String, Object> undoMeta(SessionBillingService.UndoResult r, String reason) {
-        Map<String, Object> meta = new java.util.HashMap<>();
-        meta.put("customer", r.session().getCustomerName());
-        meta.put("total", r.session().getBillTotal());
-        meta.put("reason", reason);
-        meta.put("voided_pending_debts", r.voidedDebts());
-        meta.put("card_reversals", r.reversals().stream()
-                .map(x -> Map.of("card_number", x.cardNumber(), "credited_paise", x.creditedPaise(),
-                        "re_forfeited_paise", x.reForfeitedPaise()))
-                .toList());
-        return meta;
     }
 
     // --- GET SINGLE SESSION ---
@@ -236,6 +231,7 @@ public class SessionController {
 
     // --- MEMBERSHIP CARD: tag / change / remove while the session is running (until billing) ---
     @PutMapping("/{sid}/membership-card")
+    @Audited(action = AuditActions.SESSION_CARD_TAGGED, entityType = AuditActions.ENTITY_SESSION, entityIdParam = "sid")
     public ResponseEntity<?> setMembershipCard(@PathVariable String sid, @RequestBody Map<String, Object> payload, Authentication auth) {
         String cafeId = getCafeId(auth);
         CustomerSession session = sessionRepository.findById(sid).orElse(null);
@@ -255,11 +251,18 @@ public class SessionController {
         CustomerSession saved = sessionRepository.save(session);
         logger.info("Session {} membership card {} -> {}", sid, previous, saved.getMembershipCardId());
 
-        Map<String, Object> meta = new java.util.HashMap<>();
-        meta.put("customer", saved.getCustomerName());
-        meta.put("previous_card_id", previous);
-        meta.put("membership_card", card != null ? card.getCardNumber() : null);
-        auditService.log(auth, card != null ? "SESSION_MEMBERSHIP_TAG" : "SESSION_MEMBERSHIP_UNTAG", sid, meta);
+        String previousNumber = previous == null ? null
+                : membershipCardRepository.findById(previous).map(MembershipCard::getCardNumber).orElse(previous);
+        if (!java.util.Objects.equals(previous, saved.getMembershipCardId())) {
+            String action = card == null ? AuditActions.SESSION_CARD_REMOVED
+                    : previous == null ? AuditActions.SESSION_CARD_TAGGED : AuditActions.SESSION_CARD_CHANGED;
+            String desc = card == null ? "Removed card " + previousNumber + " from " + saved.getCustomerName() + "'s session"
+                    : previous == null ? "Tagged card " + card.getCardNumber() + " to " + saved.getCustomerName() + "'s session"
+                    : "Changed card on " + saved.getCustomerName() + "'s session from " + previousNumber + " to " + card.getCardNumber();
+            auditService.record(AuditRecord.of(action).entity(AuditActions.ENTITY_SESSION, sid).description(desc)
+                    .diff(Map.of("membership_card", previousNumber == null ? "" : previousNumber),
+                          Map.of("membership_card", card == null ? "" : card.getCardNumber())));
+        }
         return ResponseEntity.ok(sessionMembershipService.attachCard(saved));
     }
 
@@ -271,6 +274,7 @@ public class SessionController {
 
     // --- ADD ANOTHER GAME TO EXISTING SESSION ---
     @PostMapping("/{sid}/games")
+    @Audited(action = AuditActions.SESSION_GAME_ADDED, entityType = AuditActions.ENTITY_SESSION, entityIdParam = "sid")
     public ResponseEntity<?> addGameToSession(@PathVariable String sid, @RequestBody Map<String, Object> payload, Authentication auth) {
         String cafeId = getCafeId(auth);
         CustomerSession session = sessionRepository.findById(sid).orElse(null);
@@ -316,11 +320,16 @@ public class SessionController {
         CustomerSession savedSession = sessionRepository.save(session);
         logger.info("Game added to session {} on {} (players={}, start={})",
                 sid, game.getResourceName(), game.getPlayerCount(), game.getStartTime());
+        auditService.record(AuditRecord.of(AuditActions.SESSION_GAME_ADDED).entity(AuditActions.ENTITY_SESSION, sid)
+                .description("Added " + game.getResourceName() + " to " + savedSession.getCustomerName() + "'s session")
+                .detail("resource", game.getResourceName()).detail("resource_id", game.getResourceId())
+                .detail("player_count", game.getPlayerCount()).detail("start_time", game.getStartTime()));
         return ResponseEntity.ok(savedSession);
     }
 
     // --- END A SPECIFIC GAME (Keep session open) ---
     @PostMapping("/{sid}/games/{gid}/end")
+    @Audited(action = AuditActions.SESSION_GAME_ENDED, entityType = AuditActions.ENTITY_SESSION, entityIdParam = "sid")
     public ResponseEntity<?> endGame(@PathVariable String sid, @PathVariable String gid, @RequestBody Map<String, Object> payload, Authentication auth) {
         CustomerSession session = sessionRepository.findById(sid).orElse(null);
         if (session == null || !session.getCafeId().equals(getCafeId(auth))) {
@@ -340,6 +349,11 @@ public class SessionController {
                     g.setEndTime(LocalDateTime.now());
                 }
                 logger.info("Game {} ({}) in session {} ended at {}", gid, g.getResourceName(), sid, g.getEndTime());
+                auditService.record(AuditRecord.of(AuditActions.SESSION_GAME_ENDED).entity(AuditActions.ENTITY_SESSION, sid)
+                        .description("Ended " + g.getResourceName() + " for " + session.getCustomerName() + " at "
+                                + AuditFormat.dateTime(g.getEndTime()))
+                        .detail("resource", g.getResourceName()).detail("game_id", gid)
+                        .detail("start_time", g.getStartTime()).detail("end_time", g.getEndTime()));
                 break;
             }
         }
@@ -351,6 +365,7 @@ public class SessionController {
 
     // --- FORCE CANCEL SESSION (Admin override, no bill) ---
     @PostMapping("/{sid}/cancel")
+    @Audited(action = AuditActions.SESSION_CANCELLED, entityType = AuditActions.ENTITY_SESSION, entityIdParam = "sid")
     public ResponseEntity<?> cancelSession(@PathVariable String sid, Authentication auth) {
         CustomerSession session = sessionRepository.findById(sid).orElse(null);
         if (session == null || !session.getCafeId().equals(getCafeId(auth))) {
@@ -360,8 +375,13 @@ public class SessionController {
         logger.info("Cancel requested for session {} ('{}', status={})", sid, session.getCustomerName(), session.getStatus());
 
         LocalDateTime now = LocalDateTime.now();
+        String statusBefore = session.getStatus();
+        List<Map<String, Object>> restored = new java.util.ArrayList<>();
         for (GameSession g : session.getGames()) {
             if ("active".equals(g.getStatus())) {
+                if (g.getItems() != null) {
+                    for (GameSessionItem it : g.getItems()) restored.add(Map.of("name", String.valueOf(it.getName()), "qty", it.getQty()));
+                }
                 if(g.getItems() != null){
                     for(GameSessionItem gameSessionItem : g.getItems()){
 
@@ -387,6 +407,11 @@ public class SessionController {
         session.setBilledAt(now);
         CustomerSession cancelled = sessionRepository.save(session);
         logger.info("Session {} cancelled", sid);
+        auditService.record(AuditRecord.of(AuditActions.SESSION_CANCELLED).entity(AuditActions.ENTITY_SESSION, sid)
+                .description("Cancelled " + cancelled.getCustomerName() + "'s session without a bill"
+                        + (restored.isEmpty() ? "" : "; stock returned for " + restored.size() + " item line(s)"))
+                .diff(Map.of("status", statusBefore), Map.of("status", "cancelled"))
+                .detail("items_returned_to_stock", restored));
         return ResponseEntity.ok(cancelled);
     }
 
@@ -419,6 +444,7 @@ public class SessionController {
     // --- ADD SNACK / ACCESSORY TO GAME ---
     @org.springframework.transaction.annotation.Transactional
     @PostMapping("/{sid}/games/{gid}/items")
+    @Audited(action = AuditActions.SESSION_ITEM_ADDED, entityType = AuditActions.ENTITY_SESSION, entityIdParam = "sid")
     public ResponseEntity<?> addItem(@PathVariable String sid, @PathVariable String gid, @RequestBody Map<String, Object> req, Authentication auth) {
         String cafeId = getCafeId(auth);
         CustomerSession session = sessionRepository.findById(sid).orElse(null);
@@ -513,6 +539,12 @@ public class SessionController {
         CustomerSession savedSession = sessionRepository.save(session);
         logger.info("Item added to session {} game {}: '{}' x{} @ {} = {}",
                 sid, gid, itemName, qty, unitPrice, sessionItem.getTotal());
+        auditService.record(AuditRecord.of(AuditActions.SESSION_ITEM_ADDED).entity(AuditActions.ENTITY_SESSION, sid)
+                .description("Added " + itemName + " x" + qty + " (" + AuditFormat.rupees(sessionItem.getTotal())
+                        + ") on " + targetGame.getResourceName() + " for " + savedSession.getCustomerName())
+                .detail("type", type).detail("ref_id", refId).detail("name", itemName).detail("qty", qty)
+                .detail("unit_price", unitPrice).detail("total", sessionItem.getTotal())
+                .detail("resource", targetGame.getResourceName()));
         return ResponseEntity.ok(savedSession);
     }
 
@@ -528,6 +560,7 @@ public class SessionController {
 
     // --- REMOVE SNACK / ACCESSORY ---
     @DeleteMapping("/{sid}/games/{gid}/items/{itemId}")
+    @Audited(action = AuditActions.SESSION_ITEM_REMOVED, entityType = AuditActions.ENTITY_SESSION, entityIdParam = "sid")
     @Transactional
     public ResponseEntity<?> removeItem(@PathVariable String sid, @PathVariable String gid, @PathVariable String itemId, Authentication auth) {
         CustomerSession session = sessionRepository.findById(sid).orElse(null);
@@ -586,6 +619,13 @@ public class SessionController {
                     // Now it is safe to remove it from the session
                     g.getItems().remove(itemToRemove);
                     logger.info("Item '{}' x{} removed from session {} game {}", itemToRemove.getName(), itemToRemove.getQty(), sid, gid);
+                    auditService.record(AuditRecord.of(AuditActions.SESSION_ITEM_REMOVED).entity(AuditActions.ENTITY_SESSION, sid)
+                            .description("Removed " + itemToRemove.getName() + " x" + itemToRemove.getQty() + " ("
+                                    + AuditFormat.rupees(itemToRemove.getTotal()) + ") from " + g.getResourceName()
+                                    + " for " + session.getCustomerName())
+                            .detail("type", itemToRemove.getType()).detail("ref_id", itemToRemove.getRefId())
+                            .detail("name", itemToRemove.getName()).detail("qty", itemToRemove.getQty())
+                            .detail("total", itemToRemove.getTotal()).detail("resource", g.getResourceName()));
                 } else {
                     logger.warn("Remove item: item {} not found in session {} game {}", itemId, sid, gid);
                 }

@@ -1,5 +1,11 @@
 package com.progameflixx.cafectrl.controller;
 
+import com.progameflixx.cafectrl.audit.AuditActions;
+import com.progameflixx.cafectrl.audit.AuditDiff;
+import com.progameflixx.cafectrl.audit.AuditFormat;
+import com.progameflixx.cafectrl.audit.AuditRecord;
+import com.progameflixx.cafectrl.audit.AuditService;
+import com.progameflixx.cafectrl.audit.Audited;
 import com.progameflixx.cafectrl.logging.LogContext;
 
 import com.progameflixx.cafectrl.entity.*;
@@ -47,6 +53,9 @@ public class CafeAdminController {
     @Autowired
     private CafeRepository cafeRepository;
 
+    @Autowired
+    private AuditService audit;
+
     // Helper to get cafeId from the logged-in admin
     private String getCafeId(Authentication auth) {
         // Assuming auth.getName() returns the user's email or ID that matches your User entity primary key
@@ -71,6 +80,7 @@ public class CafeAdminController {
     }
 
     @PutMapping("/cafe")
+    @Audited(action = AuditActions.CAFE_UPDATED, entityType = AuditActions.ENTITY_CAFE)
     public ResponseEntity<?> updateCafe(@RequestBody Cafe updates, Authentication auth) {
         String cafeId = getCafeId(auth);
 
@@ -80,6 +90,7 @@ public class CafeAdminController {
             return ResponseEntity.notFound().build();
         }
 
+        Map<String, Object> before = cafeSnapshot(existingCafe);
         // Only update fields that were actually sent in the request
         if (updates.getName() != null) existingCafe.setName(updates.getName());
         if (updates.getPhone() != null) existingCafe.setPhone(updates.getPhone());
@@ -89,6 +100,9 @@ public class CafeAdminController {
         cafeRepository.save(existingCafe);
         logger.info("Cafe profile updated: name='{}' phone={} setupComplete={}",
                 existingCafe.getName(), existingCafe.getPhone(), existingCafe.isSetupComplete());
+        audit.record(AuditRecord.of(AuditActions.CAFE_UPDATED).entity(AuditActions.ENTITY_CAFE, cafeId)
+                .description("Updated cafe profile '" + existingCafe.getName() + "'")
+                .diff(before, cafeSnapshot(existingCafe)));
         return ResponseEntity.ok(existingCafe);
     }
 
@@ -102,6 +116,7 @@ public class CafeAdminController {
     }
 
     @PostMapping("/staff")
+    @Audited(action = AuditActions.STAFF_CREATED, entityType = AuditActions.ENTITY_USER)
     public User createOperator(@RequestBody User staffReq, Authentication auth) {
         staffReq.setCafeId(getCafeId(auth));
         staffReq.setRole("OPERATOR");
@@ -110,10 +125,15 @@ public class CafeAdminController {
         User created = userRepository.save(staffReq);
         logger.info("Operator created: id={} email={} name='{}' permissions={}",
                 created.getId(), created.getEmail(), created.getName(), created.getPermissions());
+        audit.record(AuditRecord.of(AuditActions.STAFF_CREATED).entity(AuditActions.ENTITY_USER, created.getId())
+                .description("Added staff " + created.getName() + " (" + created.getEmail() + ") with permissions "
+                        + created.getPermissions())
+                .diff(null, staffSnapshot(created)));
         return created;
     }
 
     @DeleteMapping("/staff/{uid}")
+    @Audited(action = AuditActions.STAFF_DELETED, entityType = AuditActions.ENTITY_USER, entityIdParam = "uid")
     public ResponseEntity<?> deleteOperator(@PathVariable String uid, Authentication auth) {
         String cafeId = getCafeId(auth);
         User op = userRepository.findById(uid).orElse(null);
@@ -125,12 +145,17 @@ public class CafeAdminController {
         }
 
         logger.info("Deleting operator {} ({}, '{}')", uid, op.getEmail(), op.getName());
+        Map<String, Object> before = staffSnapshot(op);
         userRepository.delete(op);
+        audit.record(AuditRecord.of(AuditActions.STAFF_DELETED).entity(AuditActions.ENTITY_USER, uid)
+                .description("Deleted staff " + op.getName() + " (" + op.getEmail() + ")")
+                .diff(before, null));
         return ResponseEntity.ok().build();
     }
 
     @PutMapping("/staff/{id}")
     @PreAuthorize("hasRole('CAFE_ADMIN')")
+    @Audited(action = AuditActions.STAFF_UPDATED, entityType = AuditActions.ENTITY_USER, entityIdParam = "id")
     @org.springframework.transaction.annotation.Transactional
     public ResponseEntity<?> updateStaff(@PathVariable String id, @RequestBody User req, Authentication auth) {
         String cafeId = getCafeId(auth);
@@ -143,6 +168,8 @@ public class CafeAdminController {
             return ResponseEntity.status(404).body(Map.of("message", "Operator not found"));
         }
 
+        Map<String, Object> before = staffSnapshot(op);
+        boolean wasActive = op.isActive();
         // 2. Prevent unique email crashes
         if (req.getEmail() != null && !req.getEmail().equalsIgnoreCase(op.getEmail())) {
             boolean emailExists = userRepository.existsByEmailAndIdNot(req.getEmail(), id);
@@ -170,6 +197,15 @@ public class CafeAdminController {
         logger.info("Operator {} updated: email={} name='{}' active={} permissions={} passwordChanged={}",
                 id, saved.getEmail(), saved.getName(), saved.isActive(), saved.getPermissions(),
                 req.getPassword() != null && !req.getPassword().isBlank());
+        boolean passwordChanged = req.getPassword() != null && !req.getPassword().isBlank();
+        String action = wasActive == saved.isActive() ? AuditActions.STAFF_UPDATED
+                : saved.isActive() ? AuditActions.STAFF_REACTIVATED : AuditActions.STAFF_DEACTIVATED;
+        String verb = AuditActions.STAFF_UPDATED.equals(action) ? "Edited" : saved.isActive() ? "Reactivated" : "Deactivated";
+        audit.record(AuditRecord.of(action).entity(AuditActions.ENTITY_USER, id)
+                .description(verb + " staff " + saved.getName() + " (" + saved.getEmail() + ")"
+                        + (passwordChanged ? "; login was reset" : ""))
+                .diff(before, staffSnapshot(saved))
+                .detail("login_reset", passwordChanged));
         return ResponseEntity.ok(saved);
     }
 
@@ -182,14 +218,18 @@ public class CafeAdminController {
     }
 
     @PostMapping("/game-types")
+    @Audited(action = AuditActions.GAME_TYPE_CREATED, entityType = AuditActions.ENTITY_GAME_TYPE)
     public GameType createGameType(@RequestBody GameType gt, Authentication auth) {
         gt.setCafeId(getCafeId(auth));
         GameType saved = gameTypeRepository.save(gt);
         logger.info("Game type saved: id={} name='{}'", saved.getId(), saved.getName());
+        audit.record(AuditRecord.of(AuditActions.GAME_TYPE_CREATED).entity(AuditActions.ENTITY_GAME_TYPE, saved.getId())
+                .description("Added game type '" + saved.getName() + "'"));
         return saved;
     }
 
     @DeleteMapping("/game-types/{gid}")
+    @Audited(action = AuditActions.GAME_TYPE_DELETED, entityType = AuditActions.ENTITY_GAME_TYPE, entityIdParam = "gid")
     public ResponseEntity<?> deleteGameType(@PathVariable String gid, Authentication auth) {
         String cafeId = getCafeId(auth);
 
@@ -203,6 +243,8 @@ public class CafeAdminController {
 
         gameTypeRepository.delete(gt);
         logger.info("Game type deleted: id={} name='{}'", gid, gt.getName());
+        audit.record(AuditRecord.of(AuditActions.GAME_TYPE_DELETED).entity(AuditActions.ENTITY_GAME_TYPE, gid)
+                .description("Deleted game type '" + gt.getName() + "'"));
         return ResponseEntity.ok(Map.of("ok", true)); // Matches Python's {"ok": True}
     }
 
@@ -215,14 +257,22 @@ public class CafeAdminController {
     }
 
     @PostMapping("/rate-cards")
+    @Audited(action = AuditActions.RATE_CARD_UPDATED, entityType = AuditActions.ENTITY_RATE_CARD)
     public RateCard createRateCard(@RequestBody RateCard rc, Authentication auth) {
         rc.setCafeId(getCafeId(auth));
+        Map<String, Object> before = rc.getId() == null ? null
+                : rateCardRepository.findById(rc.getId()).map(CafeAdminController::rateCardSnapshot).orElse(null);
         RateCard saved = rateCardRepository.save(rc);
+        audit.record(AuditRecord.of(before == null ? AuditActions.RATE_CARD_CREATED : AuditActions.RATE_CARD_UPDATED)
+                .entity(AuditActions.ENTITY_RATE_CARD, saved.getId())
+                .description((before == null ? "Created rate card '" : "Changed prices on rate card '") + saved.getName() + "'")
+                .diff(before, rateCardSnapshot(saved)));
         logger.info("Rate card saved: id={} grace={} interval={}", saved.getId(), saved.getGraceMinutes(), saved.getBillingIntervalMinutes());
         return saved;
     }
 
     @DeleteMapping("/rate-cards/{rid}")
+    @Audited(action = AuditActions.RATE_CARD_DELETED, entityType = AuditActions.ENTITY_RATE_CARD, entityIdParam = "rid")
     public ResponseEntity<?> deleteRateCard(@PathVariable String rid, Authentication auth) {
         String cafeId = getCafeId(auth);
 
@@ -232,8 +282,11 @@ public class CafeAdminController {
             return ResponseEntity.notFound().build();
         }
 
+        Map<String, Object> before = rateCardSnapshot(rc);
         rateCardRepository.delete(rc);
         logger.info("Rate card deleted: id={}", rid);
+        audit.record(AuditRecord.of(AuditActions.RATE_CARD_DELETED).entity(AuditActions.ENTITY_RATE_CARD, rid)
+                .description("Deleted rate card '" + rc.getName() + "'").diff(before, null));
         return ResponseEntity.ok(Map.of("ok", true));
     }
 
@@ -281,15 +334,23 @@ public class CafeAdminController {
     }
 
     @PostMapping("/resources")
+    @Audited(action = AuditActions.RESOURCE_UPDATED, entityType = AuditActions.ENTITY_RESOURCE)
     public Resource createResource(@RequestBody Resource res, Authentication auth) {
         res.setCafeId(getCafeId(auth));
+        Map<String, Object> before = res.getId() == null ? null
+                : resourceRepository.findById(res.getId()).map(CafeAdminController::resourceSnapshot).orElse(null);
         Resource saved = resourceRepository.save(res);
+        audit.record(AuditRecord.of(before == null ? AuditActions.RESOURCE_CREATED : AuditActions.RESOURCE_UPDATED)
+                .entity(AuditActions.ENTITY_RESOURCE, saved.getId())
+                .description((before == null ? "Added resource '" : "Edited resource '") + saved.getName() + "'")
+                .diff(before, resourceSnapshot(saved)));
         logger.info("Resource saved: id={} name='{}' gameType={} rateCard={}",
                 saved.getId(), saved.getName(), saved.getGameTypeId(), saved.getRateCardId());
         return saved;
     }
 
     @DeleteMapping("/resources/{rid}")
+    @Audited(action = AuditActions.RESOURCE_DELETED, entityType = AuditActions.ENTITY_RESOURCE, entityIdParam = "rid")
     public ResponseEntity<?> deleteResource(@PathVariable String rid, Authentication auth) {
         String cafeId = getCafeId(auth);
 
@@ -299,8 +360,11 @@ public class CafeAdminController {
             return ResponseEntity.notFound().build();
         }
 
+        Map<String, Object> before = resourceSnapshot(res);
         resourceRepository.delete(res);
         logger.info("Resource deleted: id={} name='{}'", rid, res.getName());
+        audit.record(AuditRecord.of(AuditActions.RESOURCE_DELETED).entity(AuditActions.ENTITY_RESOURCE, rid)
+                .description("Deleted resource '" + res.getName() + "'").diff(before, null));
         return ResponseEntity.ok(Map.of("ok", true));
     }
 
@@ -316,14 +380,19 @@ public class CafeAdminController {
     }
 
     @PostMapping("/accessories")
+    @Audited(action = AuditActions.ACCESSORY_CREATED, entityType = AuditActions.ENTITY_ACCESSORY)
     public Accessory createAccessory(@RequestBody Accessory acc, Authentication auth) {
         acc.setCafeId(getCafeId(auth));
         Accessory saved = accessoryRepository.save(acc);
         logger.info("Accessory created: id={} name='{}' price={}", saved.getId(), saved.getName(), saved.getPrice());
+        audit.record(AuditRecord.of(AuditActions.ACCESSORY_CREATED).entity(AuditActions.ENTITY_ACCESSORY, saved.getId())
+                .description("Added accessory '" + saved.getName() + "' at " + AuditFormat.rupees(saved.getPrice()))
+                .diff(null, AuditDiff.snapshot("name", saved.getName(), "price", saved.getPrice())));
         return saved;
     }
 
     @PutMapping("/accessories/{aid}")
+    @Audited(action = AuditActions.ACCESSORY_UPDATED, entityType = AuditActions.ENTITY_ACCESSORY, entityIdParam = "aid")
     public ResponseEntity<?> updateAccessory(@PathVariable String aid, @RequestBody Accessory updates, Authentication auth) {
         String cafeId = getCafeId(auth);
 
@@ -333,16 +402,21 @@ public class CafeAdminController {
             return ResponseEntity.notFound().build();
         }
 
+        Map<String, Object> before = AuditDiff.snapshot("name", existingAcc.getName(), "price", existingAcc.getPrice());
         // Update fields if they were sent in the request
         if (updates.getName() != null) existingAcc.setName(updates.getName());
         if (updates.getPrice() != null) existingAcc.setPrice(updates.getPrice());
 
         accessoryRepository.save(existingAcc);
         logger.info("Accessory updated: id={} name='{}' price={}", aid, existingAcc.getName(), existingAcc.getPrice());
+        audit.record(AuditRecord.of(AuditActions.ACCESSORY_UPDATED).entity(AuditActions.ENTITY_ACCESSORY, aid)
+                .description("Edited accessory '" + existingAcc.getName() + "'")
+                .diff(before, AuditDiff.snapshot("name", existingAcc.getName(), "price", existingAcc.getPrice())));
         return ResponseEntity.ok(existingAcc);
     }
 
     @DeleteMapping("/accessories/{aid}")
+    @Audited(action = AuditActions.ACCESSORY_DELETED, entityType = AuditActions.ENTITY_ACCESSORY, entityIdParam = "aid")
     public ResponseEntity<?> deleteAccessory(@PathVariable String aid, Authentication auth) {
         String cafeId = getCafeId(auth);
 
@@ -354,6 +428,36 @@ public class CafeAdminController {
 
         accessoryRepository.delete(acc);
         logger.info("Accessory deleted: id={} name='{}'", aid, acc.getName());
+        audit.record(AuditRecord.of(AuditActions.ACCESSORY_DELETED).entity(AuditActions.ENTITY_ACCESSORY, aid)
+                .description("Deleted accessory '" + acc.getName() + "'")
+                .diff(AuditDiff.snapshot("name", acc.getName(), "price", acc.getPrice()), null));
         return ResponseEntity.ok(Map.of("ok", true));
+    }
+
+    // =====================================================================
+    // Audit snapshots: the fields compared for before/after. Never includes passwords.
+    // =====================================================================
+
+    private static Map<String, Object> cafeSnapshot(Cafe c) {
+        return AuditDiff.snapshot("name", c.getName(), "phone", c.getPhone(), "address", c.getAddress(),
+                "setup_complete", c.isSetupComplete());
+    }
+
+    private static Map<String, Object> staffSnapshot(User u) {
+        return AuditDiff.snapshot("name", u.getName(), "email", u.getEmail(), "role", u.getRole(),
+                "permissions", u.getPermissions() == null ? List.of() : new ArrayList<>(u.getPermissions()),
+                "is_active", u.isActive());
+    }
+
+    private static Map<String, Object> rateCardSnapshot(RateCard r) {
+        return AuditDiff.snapshot("name", r.getName(), "game_type_id", r.getGameTypeId(),
+                "billing_interval_minutes", r.getBillingIntervalMinutes(), "grace_minutes", r.getGraceMinutes(),
+                "player_counts", r.getPlayerCounts() == null ? null : new ArrayList<>(r.getPlayerCounts()),
+                "weekday_prices", r.getWeekdayPrices() == null ? null : new java.util.LinkedHashMap<>(r.getWeekdayPrices()));
+    }
+
+    private static Map<String, Object> resourceSnapshot(Resource r) {
+        return AuditDiff.snapshot("name", r.getName(), "game_type_id", r.getGameTypeId(),
+                "rate_card_id", r.getRateCardId(), "is_active", r.getIsActive());
     }
 }

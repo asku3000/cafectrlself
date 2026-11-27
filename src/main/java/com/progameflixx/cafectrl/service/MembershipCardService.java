@@ -1,5 +1,10 @@
 package com.progameflixx.cafectrl.service;
 
+import com.progameflixx.cafectrl.audit.AuditActions;
+import com.progameflixx.cafectrl.audit.AuditDiff;
+import com.progameflixx.cafectrl.audit.AuditFormat;
+import com.progameflixx.cafectrl.audit.AuditRecord;
+import com.progameflixx.cafectrl.audit.AuditService;
 import com.progameflixx.cafectrl.dto.MembershipCardRequests;
 import com.progameflixx.cafectrl.dto.MembershipCardView;
 import com.progameflixx.cafectrl.entity.MembershipCard;
@@ -56,10 +61,13 @@ public class MembershipCardService {
     private final MembershipPlanService planService;
     private final Clock clock;
     private final TransactionTemplate newTransaction;
+    private final AuditService audit;
 
     public MembershipCardService(MembershipCardRepository cardRepository, MembershipLedgerRepository ledgerRepository,
                                  MembershipPlanRepository planRepository, MembershipSettingsRepository settingsRepository,
-                                 MembershipPlanService planService, Clock clock, PlatformTransactionManager txManager) {
+                                 MembershipPlanService planService, Clock clock, PlatformTransactionManager txManager,
+                                 AuditService audit) {
+        this.audit = audit;
         this.cardRepository = cardRepository;
         this.ledgerRepository = ledgerRepository;
         this.planRepository = planRepository;
@@ -236,6 +244,15 @@ public class MembershipCardService {
         logger.info("Membership card {} ({}) issued to '{}' {} on plan '{}': paid={} bonus={} valid {}..{} via {}",
                 card.getId(), card.getCardNumber(), name, phone, plan.getName(), plan.getLoadAmountPaise(),
                 plan.getBonusAmountPaise(), card.getStartDate(), card.getExpiryDate(), parts);
+        auditCard(AuditActions.CARD_ISSUED, actor, card,
+                "Sold card " + card.getCardNumber() + " (" + plan.getName() + ") to " + name + " " + phone + ": paid "
+                        + AuditFormat.paise(plan.getLoadAmountPaise()) + " by " + describeParts(parts) + ", bonus "
+                        + AuditFormat.paise(plan.getBonusAmountPaise()) + ", valid " + AuditFormat.date(card.getStartDate())
+                        + " - " + AuditFormat.date(card.getExpiryDate()),
+                r -> r.detail("plan", plan.getName()).detail("paid_paise", plan.getLoadAmountPaise())
+                        .detail("bonus_paise", plan.getBonusAmountPaise()).detail("payments", parts)
+                        .detail("start_date", card.getStartDate()).detail("expiry_date", card.getExpiryDate())
+                        .detail("customer_name", name).detail("customer_phone", phone).detail("note", note));
         return card;
     }
 
@@ -267,7 +284,10 @@ public class MembershipCardService {
         LocalDate start = resolveStartDate(req.getStartDate());
         String note = optionalText(req.getNote(), 500);
 
+        Map<String, Object> before = cardSnapshot(card);
+        String oldPlan = card.getPlanName();
         expireIfDue(card, actor);
+        long forfeited = card.totalBalancePaise();
         forfeitAll(card, Type.RECHARGE_FORFEIT, actor, "Remaining balance forfeited on recharge (no carry-forward)");
 
         card.applyPlanSnapshot(plan);
@@ -280,6 +300,15 @@ public class MembershipCardService {
         logger.info("Membership card {} ({}) recharged on plan '{}': paid={} bonus={} valid {}..{} via {}",
                 card.getId(), card.getCardNumber(), plan.getName(), plan.getLoadAmountPaise(),
                 plan.getBonusAmountPaise(), card.getStartDate(), card.getExpiryDate(), parts);
+        auditCard(AuditActions.CARD_RECHARGED, actor, card,
+                "Recharged card " + card.getCardNumber() + " (" + card.getCustomerName() + ") on " + plan.getName()
+                        + (plan.getName().equals(oldPlan) ? "" : " (was " + oldPlan + ")") + ": paid "
+                        + AuditFormat.paise(plan.getLoadAmountPaise()) + " by " + describeParts(parts) + ", bonus "
+                        + AuditFormat.paise(plan.getBonusAmountPaise())
+                        + (forfeited > 0 ? ", " + AuditFormat.paise(forfeited) + " old balance forfeited" : "")
+                        + ", valid " + AuditFormat.date(card.getStartDate()) + " - " + AuditFormat.date(card.getExpiryDate()),
+                r -> r.diff(before, cardSnapshot(card)).detail("payments", parts)
+                        .detail("forfeited_paise", forfeited).detail("note", note));
         return card;
     }
 
@@ -336,7 +365,15 @@ public class MembershipCardService {
         }
 
         long sign = debit ? -1 : 1;
+        Map<String, Object> before = cardSnapshot(card);
         post(card, Type.ADJUSTMENT, sign * paid, sign * bonus, admin, e -> e.setNote(reason));
+        auditCard(AuditActions.CARD_ADJUSTED, admin, card,
+                (debit ? "Debited " : "Credited ") + AuditFormat.paise(paid + bonus) + (debit ? " from" : " to")
+                        + " card " + card.getCardNumber() + " (" + card.getCustomerName() + ")"
+                        + (paid > 0 && bonus > 0 ? ": paid " + AuditFormat.paise(paid) + ", bonus " + AuditFormat.paise(bonus)
+                        : paid > 0 ? " (paid balance)" : " (bonus balance)"),
+                r -> r.reason(reason).diff(before, cardSnapshot(card)).detail("direction", dir)
+                        .detail("paid_paise", paid).detail("bonus_paise", bonus));
         logger.info("Membership card {} manual {}: paid={} bonus={} reason='{}'", cardId, dir, paid, bonus, reason);
         return card;
     }
@@ -359,10 +396,15 @@ public class MembershipCardService {
         if (!newExpiry.isAfter(old)) throw bad("New expiry date must be after the current one (" + old + ")");
         if (newExpiry.isBefore(today())) throw bad("New expiry date can't be in the past");
 
+        Map<String, Object> before = cardSnapshot(card);
         if (card.getStatus() == Status.EXPIRED) card.setStatus(Status.ACTIVE);
         card.setExpiryDate(newExpiry);
         post(card, Type.EXPIRY_EXTENDED, 0, 0, admin, e -> e.setNote("Expiry " + old + " -> " + newExpiry + ": " + reason));
         logger.info("Membership card {} expiry extended {} -> {} reason='{}'", cardId, old, newExpiry, reason);
+        auditCard(AuditActions.CARD_EXPIRY_EXTENDED, admin, card,
+                "Extended card " + card.getCardNumber() + " (" + card.getCustomerName() + ") expiry from "
+                        + AuditFormat.date(old) + " to " + AuditFormat.date(newExpiry),
+                r -> r.reason(reason).diff(before, cardSnapshot(card)));
         return card;
     }
 
@@ -401,12 +443,18 @@ public class MembershipCardService {
         LocalDate newExpiry = oldExpiry.plusDays(shift);
         if (newExpiry.isBefore(today())) throw bad("With that start date the card would already have expired on " + newExpiry);
 
+        Map<String, Object> before = cardSnapshot(card);
         card.setStartDate(newStart);
         card.setExpiryDate(newExpiry);
         post(card, Type.START_DATE_CHANGED, 0, 0, admin, e -> e.setNote(
                 "Valid " + oldStart + ".." + oldExpiry + " -> " + newStart + ".." + newExpiry + ": " + reason));
         logger.info("Membership card {} start date {} -> {} (expiry {} -> {}) reason='{}'",
                 cardId, oldStart, newStart, oldExpiry, newExpiry, reason);
+        auditCard(AuditActions.CARD_START_DATE_CHANGED, admin, card,
+                "Moved card " + card.getCardNumber() + " (" + card.getCustomerName() + ") start from "
+                        + AuditFormat.date(oldStart) + " to " + AuditFormat.date(newStart) + " (valid till "
+                        + AuditFormat.date(newExpiry) + ")",
+                r -> r.reason(reason).diff(before, cardSnapshot(card)));
         return card;
     }
 
@@ -419,6 +467,8 @@ public class MembershipCardService {
         MembershipCard card = lock(admin.getCafeId(), cardId);
         if (card.getStatus() == Status.CLOSED) throw bad("This card is already closed");
         Status eff = card.effectiveStatus(today());
+        Map<String, Object> before = cardSnapshot(card);
+        long forfeitedOnClose = 0;
 
         switch (action) {
             case "SUSPEND" -> {
@@ -435,6 +485,7 @@ public class MembershipCardService {
             }
             case "CLOSE" -> {
                 expireIfDue(card, admin);
+                forfeitedOnClose = card.totalBalancePaise();
                 forfeitAll(card, Type.CLOSE_FORFEIT, admin, "Balance forfeited on close: " + reason);
                 card.setStatus(Status.CLOSED);
                 post(card, Type.CLOSED, 0, 0, admin, e -> e.setNote(reason));
@@ -442,6 +493,17 @@ public class MembershipCardService {
             default -> throw bad("Action must be SUSPEND, REACTIVATE or CLOSE");
         }
         logger.info("Membership card {} {} reason='{}'", cardId, action, reason);
+        long forfeitedFinal = forfeitedOnClose;
+        String label = card.getCardNumber() + " (" + card.getCustomerName() + ")";
+        switch (action) {
+            case "SUSPEND" -> auditCard(AuditActions.CARD_SUSPENDED, admin, card, "Suspended card " + label,
+                    r -> r.reason(reason).diff(before, cardSnapshot(card)));
+            case "REACTIVATE" -> auditCard(AuditActions.CARD_REACTIVATED, admin, card, "Reactivated card " + label,
+                    r -> r.reason(reason).diff(before, cardSnapshot(card)));
+            default -> auditCard(AuditActions.CARD_CLOSED, admin, card, "Closed card " + label
+                            + (forfeitedFinal > 0 ? ", " + AuditFormat.paise(forfeitedFinal) + " balance forfeited" : ""),
+                    r -> r.reason(reason).diff(before, cardSnapshot(card)).detail("forfeited_paise", forfeitedFinal));
+        }
         return card;
     }
 
@@ -499,6 +561,14 @@ public class MembershipCardService {
         });
         logger.info("Card {} ({}) debited {} for session {} bill #{} (paid {}, bonus {}, order {})",
                 cardId, card.getCardNumber(), amountPaise, sessionId, billSeq, fromPaid, fromBonus, order);
+        auditCard(AuditActions.CARD_DEBITED, actor, card,
+                "Deducted " + AuditFormat.paise(amountPaise) + " from card " + card.getCardNumber() + " for Bill "
+                        + AuditFormat.billNo(sessionId) + (customerName != null ? " (" + customerName + ")" : "")
+                        + "; balance left " + AuditFormat.paise(card.totalBalancePaise()),
+                r -> r.detail("session_id", sessionId).detail("bill_seq", billSeq).detail("amount_paise", amountPaise)
+                        .detail("from_paid_paise", fromPaid).detail("from_bonus_paise", fromBonus)
+                        .detail("deduction_order", order.name()).detail("ledger_entry_id", entry.getId())
+                        .detail("balance_after_paise", card.totalBalancePaise()));
         return entry;
     }
 
@@ -535,8 +605,44 @@ public class MembershipCardService {
             logger.info("Reversed card debit {} on card {} for session {}: credited {} (re-forfeited {})",
                     debit.getId(), card.getCardNumber(), sessionId, credited, reForfeited);
             out.add(new Reversal(card.getId(), card.getCardNumber(), credited, reForfeited));
+            long reForfeitedFinal = reForfeited;
+            auditCard(AuditActions.CARD_DEBIT_REVERSED, actor, card,
+                    "Returned " + AuditFormat.paise(credited) + " to card " + card.getCardNumber() + " from Bill "
+                            + AuditFormat.billNo(sessionId)
+                            + (reForfeitedFinal > 0 ? " (then forfeited: card is " + card.getStatus().name().toLowerCase(Locale.ROOT) + ")" : ""),
+                    r -> r.reason(reason).detail("session_id", sessionId).detail("reversed_ledger_entry_id", debit.getId())
+                            .detail("credited_paise", credited).detail("re_forfeited_paise", reForfeitedFinal));
         }
         return out;
+    }
+
+    // =====================================================================
+    // Audit (same transaction as the balance change)
+    // =====================================================================
+
+    /** actor null = SYSTEM (scheduled expiry). */
+    private void auditCard(String action, User actor, MembershipCard card, String description,
+                           java.util.function.Consumer<AuditRecord> extra) {
+        AuditRecord r = AuditRecord.of(action).entity(AuditActions.ENTITY_MEMBERSHIP_CARD, card.getId())
+                .cafe(card.getCafeId()).description(description);
+        if (actor == null) r.system(); else r.actor(actor);
+        if (extra != null) extra.accept(r);
+        audit.recordInTransaction(r);
+    }
+
+    private static Map<String, Object> cardSnapshot(MembershipCard c) {
+        return AuditDiff.snapshot(
+                "status", c.getStatus().name(),
+                "plan", c.getPlanName(),
+                "paid_balance_paise", c.getPaidBalancePaise(),
+                "bonus_balance_paise", c.getBonusBalancePaise(),
+                "start_date", String.valueOf(c.getStartDate()),
+                "expiry_date", String.valueOf(c.getExpiryDate()));
+    }
+
+    private static String describeParts(List<MembershipPaymentPart> parts) {
+        return String.join(" + ", parts.stream()
+                .map(p -> p.getMode().toUpperCase(Locale.ROOT) + " " + AuditFormat.paise(p.getAmountPaise())).toList());
     }
 
     private static String rupees(long paise) {
@@ -572,8 +678,16 @@ public class MembershipCardService {
         if (card.getStatus() != Status.ACTIVE && card.getStatus() != Status.SUSPENDED) return false;
         if (!today().isAfter(card.getExpiryDate())) return false;
         LocalDate expiry = card.getExpiryDate();
+        long forfeited = card.totalBalancePaise();
+        long paidLeft = card.getPaidBalancePaise();
+        long bonusLeft = card.getBonusBalancePaise();
         forfeitAll(card, Type.EXPIRY_FORFEIT, actor, "Card expired on " + expiry, "EXPIRY:" + card.getId() + ":" + expiry);
         card.setStatus(Status.EXPIRED);
+        auditCard(AuditActions.CARD_EXPIRED, null, card,
+                "Card " + card.getCardNumber() + " (" + card.getCustomerName() + ") expired after "
+                        + AuditFormat.date(expiry) + (forfeited > 0 ? "; " + AuditFormat.paise(forfeited) + " forfeited" : ""),
+                r -> r.detail("expiry_date", expiry).detail("forfeited_paise", forfeited)
+                        .detail("forfeited_paid_paise", paidLeft).detail("forfeited_bonus_paise", bonusLeft));
         logger.info("Membership card {} ({}) expired (valid till {})", card.getId(), card.getCardNumber(), expiry);
         return true;
     }

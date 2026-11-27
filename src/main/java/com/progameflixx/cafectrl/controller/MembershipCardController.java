@@ -7,7 +7,9 @@ import com.progameflixx.cafectrl.entity.MembershipCard;
 import com.progameflixx.cafectrl.entity.MembershipLedgerEntry;
 import com.progameflixx.cafectrl.repository.CustomerSessionRepository;
 import com.progameflixx.cafectrl.entity.User;
-import com.progameflixx.cafectrl.service.AuditService;
+import com.progameflixx.cafectrl.audit.AuditActions;
+import com.progameflixx.cafectrl.audit.AuditService;
+import com.progameflixx.cafectrl.audit.Audited;
 import com.progameflixx.cafectrl.service.CurrentUserService;
 import com.progameflixx.cafectrl.service.MembershipCardService;
 import org.slf4j.Logger;
@@ -80,75 +82,57 @@ public class MembershipCardController {
         return body;
     }
 
+    @Audited(action = AuditActions.CARD_ISSUED, entityType = AuditActions.ENTITY_MEMBERSHIP_CARD)
     @PostMapping
     public MembershipCardView issue(@RequestBody MembershipCardRequests.Issue req, Authentication auth) {
         User user = currentUser.require(auth);
         CurrentUserService.requirePermission(user, CurrentUserService.PERM_MEMBERSHIPS);
         MembershipCard card = idempotent(() -> cardService.issue(user, req), "ISSUE", user, req.getRequestId());
-        auditService.log(auth, "MEMBERSHIP_CARD_ISSUE", card.getId(), Map.of(
-                "card_number", card.getCardNumber(), "customer", card.getCustomerName(),
-                "plan", card.getPlanName(), "paid_paise", card.getPlanLoadAmountPaise(),
-                "bonus_paise", card.getPlanBonusAmountPaise(),
-                "payments", req.getPayments() != null && !req.getPayments().isEmpty()
-                        ? req.getPayments() : String.valueOf(req.getPaymentMode())));
         return cardService.toView(card);
     }
 
+    @Audited(action = AuditActions.CARD_RECHARGED, entityType = AuditActions.ENTITY_MEMBERSHIP_CARD, entityIdParam = "id")
     @PostMapping("/{id}/recharge")
     public MembershipCardView recharge(@PathVariable String id, @RequestBody MembershipCardRequests.Recharge req, Authentication auth) {
         User user = currentUser.require(auth);
         CurrentUserService.requirePermission(user, CurrentUserService.PERM_MEMBERSHIPS);
         MembershipCard card = idempotent(() -> cardService.recharge(user, id, req), "RECHARGE", user, req.getRequestId());
-        auditService.log(auth, "MEMBERSHIP_CARD_RECHARGE", card.getId(), Map.of(
-                "card_number", card.getCardNumber(), "plan", card.getPlanName(),
-                "paid_paise", card.getPlanLoadAmountPaise(), "bonus_paise", card.getPlanBonusAmountPaise(),
-                "payments", req.getPayments() != null && !req.getPayments().isEmpty()
-                        ? req.getPayments() : String.valueOf(req.getPaymentMode())));
         return cardService.toView(card);
     }
 
+    @Audited(action = AuditActions.CARD_ADJUSTED, entityType = AuditActions.ENTITY_MEMBERSHIP_CARD, entityIdParam = "id")
     @PostMapping("/{id}/adjust")
     @PreAuthorize("hasRole('CAFE_ADMIN')")
     public MembershipCardView adjust(@PathVariable String id, @RequestBody MembershipCardRequests.Adjust req, Authentication auth) {
         User user = currentUser.require(auth);
         MembershipCard card = cardService.adjust(user, id, req);
-        auditService.log(auth, "MEMBERSHIP_CARD_ADJUST", card.getId(), Map.of(
-                "card_number", card.getCardNumber(), "direction", String.valueOf(req.getDirection()),
-                "paid_paise", req.getPaidPaise() == null ? 0 : req.getPaidPaise(),
-                "bonus_paise", req.getBonusPaise() == null ? 0 : req.getBonusPaise(),
-                "reason", req.getReason()));
         return cardService.toView(card);
     }
 
+    @Audited(action = AuditActions.CARD_EXPIRY_EXTENDED, entityType = AuditActions.ENTITY_MEMBERSHIP_CARD, entityIdParam = "id")
     @PostMapping("/{id}/extend")
     @PreAuthorize("hasRole('CAFE_ADMIN')")
     public MembershipCardView extend(@PathVariable String id, @RequestBody MembershipCardRequests.Extend req, Authentication auth) {
         User user = currentUser.require(auth);
         MembershipCard card = cardService.extendExpiry(user, id, req);
-        auditService.log(auth, "MEMBERSHIP_CARD_EXTEND", card.getId(), Map.of(
-                "card_number", card.getCardNumber(), "new_expiry", String.valueOf(card.getExpiryDate()),
-                "reason", req.getReason()));
         return cardService.toView(card);
     }
 
+    @Audited(action = AuditActions.CARD_START_DATE_CHANGED, entityType = AuditActions.ENTITY_MEMBERSHIP_CARD, entityIdParam = "id")
     @PostMapping("/{id}/start-date")
     @PreAuthorize("hasRole('CAFE_ADMIN')")
     public MembershipCardView changeStartDate(@PathVariable String id, @RequestBody MembershipCardRequests.ChangeStart req, Authentication auth) {
         User user = currentUser.require(auth);
         MembershipCard card = cardService.changeStartDate(user, id, req);
-        auditService.log(auth, "MEMBERSHIP_CARD_START_DATE", card.getId(), Map.of(
-                "card_number", card.getCardNumber(), "new_start", String.valueOf(card.getStartDate()),
-                "new_expiry", String.valueOf(card.getExpiryDate()), "reason", req.getReason()));
         return cardService.toView(card);
     }
 
+    @Audited(action = "CARD_STATUS_CHANGE", entityType = AuditActions.ENTITY_MEMBERSHIP_CARD, entityIdParam = "id")
     @PostMapping("/{id}/status")
     @PreAuthorize("hasRole('CAFE_ADMIN')")
     public MembershipCardView changeStatus(@PathVariable String id, @RequestBody MembershipCardRequests.StatusChange req, Authentication auth) {
         User user = currentUser.require(auth);
         MembershipCard card = cardService.changeStatus(user, id, req);
-        auditService.log(auth, "MEMBERSHIP_CARD_" + String.valueOf(req.getAction()).toUpperCase(), card.getId(), Map.of(
-                "card_number", card.getCardNumber(), "reason", req.getReason()));
         return cardService.toView(card);
     }
 

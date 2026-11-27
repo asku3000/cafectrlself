@@ -20,6 +20,6 @@ class MembershipMigrationTest {
     void flywayAppliedMembershipMigrations() {
         List<String> applied = jdbc.queryForList(
                 "SELECT \"version\" FROM \"flyway_schema_history\" WHERE \"success\" = TRUE", String.class);
-        assertTrue(applied.containsAll(List.of("1", "2")), "Membership migrations not applied, history: " + applied);
+        assertTrue(applied.containsAll(List.of("1", "2", "3", "4", "5")), "Migrations not applied, history: " + applied);
     }
 }
