@@ -3,6 +3,7 @@ package com.progameflixx.cafectrl.service;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.progameflixx.cafectrl.entity.MembershipLedgerEntry;
 import com.progameflixx.cafectrl.entity.MembershipLedgerEntry.Type;
+import com.progameflixx.cafectrl.entity.MembershipPaymentPart;
 import com.progameflixx.cafectrl.repository.MembershipCardRepository;
 import com.progameflixx.cafectrl.repository.MembershipLedgerRepository;
 import org.springframework.http.HttpStatus;
@@ -87,9 +88,11 @@ public class MembershipReportService {
                     if (e.getEntryType() == Type.LOAD) { p[0]++; newCards++; } else { p[1]++; recharges++; }
                     p[2] += paid;
                     collected += paid;
-                    String mode = e.getPaymentMode() == null ? "unknown" : e.getPaymentMode();
-                    modes.merge(mode, paid, Long::sum);
-                    planModes.computeIfAbsent(key, k -> new TreeMap<>()).merge(mode, paid, Long::sum);
+                    Map<String, Long> pm = planModes.computeIfAbsent(key, k -> new TreeMap<>());
+                    for (MembershipPaymentPart part : partsOf(e)) {
+                        modes.merge(part.getMode(), part.getAmountPaise(), Long::sum);
+                        pm.merge(part.getMode(), part.getAmountPaise(), Long::sum);
+                    }
                 }
                 case BONUS -> {
                     plan.computeIfAbsent(key, k -> new long[4])[3] += bonus;
@@ -130,6 +133,8 @@ public class MembershipReportService {
                        @JsonProperty("plan_name") String planName,
                        String mode,
                        @JsonProperty("amount_paise") long amountPaise,
+                       /** One part per payment mode; adds up to amount_paise. */
+                       List<MembershipPaymentPart> payments,
                        @JsonProperty("created_at") LocalDateTime createdAt,
                        @JsonProperty("user_name") String userName) {}
 
@@ -145,13 +150,20 @@ public class MembershipReportService {
         return loads.stream().map(e -> {
             String[] info = cardInfo.getOrDefault(e.getCardId(), new String[]{null, null});
             return new Sale(e.getId(), e.getCardId(), info[0], info[1], e.getEntryType().name(), e.getPlanName(),
-                    e.getPaymentMode(), e.getPaidPortionPaise(), e.getCreatedAt(), e.getUserName());
+                    e.getPaymentMode(), e.getPaidPortionPaise(), partsOf(e), e.getCreatedAt(), e.getUserName());
         }).toList();
     }
 
     private List<MembershipLedgerEntry> entries(String cafeId, LocalDate from, LocalDate to) {
         return ledgerRepository.findByCafeIdAndCreatedAtGreaterThanEqualAndCreatedAtLessThanOrderByIdAsc(
                 cafeId, from.atStartOfDay(), to.plusDays(1).atStartOfDay());
+    }
+
+    /** How a LOAD / RECHARGE was paid: its breakdown, or (older entries) the single payment_mode for the full amount. */
+    static List<MembershipPaymentPart> partsOf(MembershipLedgerEntry e) {
+        if (e.getPaymentBreakdown() != null && !e.getPaymentBreakdown().isEmpty()) return e.getPaymentBreakdown();
+        String mode = e.getPaymentMode() == null ? "unknown" : e.getPaymentMode();
+        return List.of(new MembershipPaymentPart(mode, e.getPaidPortionPaise()));
     }
 
     private static void add(long[] acc, long paid, long bonus) {

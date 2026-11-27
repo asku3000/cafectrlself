@@ -26,7 +26,7 @@ public class MembershipLedgerEntry {
         LOAD, RECHARGE, BONUS, BILL_DEBIT, REVERSAL, ADJUSTMENT,
         EXPIRY_FORFEIT, RECHARGE_FORFEIT, CLOSE_FORFEIT,
         // zero-amount status events, kept so the card history is complete
-        EXPIRY_EXTENDED, SUSPENDED, REACTIVATED, CLOSED
+        EXPIRY_EXTENDED, START_DATE_CHANGED, SUSPENDED, REACTIVATED, CLOSED
     }
 
     @Id
@@ -69,6 +69,12 @@ public class MembershipLedgerEntry {
     @Column(name = "payment_mode", length = 20)
     @JsonProperty("payment_mode")
     private String paymentMode;
+
+    /** LOAD / RECHARGE only: how the money was collected, one part per payment mode. */
+    @org.hibernate.annotations.JdbcTypeCode(org.hibernate.type.SqlTypes.JSON)
+    @Column(name = "payment_breakdown", columnDefinition = "json")
+    @JsonProperty("payment_breakdown")
+    private java.util.List<MembershipPaymentPart> paymentBreakdown;
 
     @Column(name = "plan_id")
     @JsonProperty("plan_id")

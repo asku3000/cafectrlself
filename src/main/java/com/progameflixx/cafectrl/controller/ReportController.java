@@ -209,11 +209,14 @@ public class ReportController {
                 membershipReportService.salesOn(cafeId, date);
         double cardSalesTotal = 0.0;
         for (com.progameflixx.cafectrl.service.MembershipReportService.Sale sale : cardSales) {
-            double amt = com.progameflixx.cafectrl.entity.MembershipMath.paiseToRupees(sale.amountPaise());
-            String mode = sale.mode() != null ? sale.mode().toLowerCase() : "cash";
-            totalCollected += amt;
-            cardSalesTotal += amt;
-            byMode.put(mode, byMode.getOrDefault(mode, 0.0) + amt);
+            // A sale may be split across modes (e.g. part UPI, part cash): credit each part to its own mode
+            for (com.progameflixx.cafectrl.entity.MembershipPaymentPart part : sale.payments()) {
+                double amt = com.progameflixx.cafectrl.entity.MembershipMath.paiseToRupees(part.getAmountPaise());
+                String mode = part.getMode() != null ? part.getMode().toLowerCase() : "cash";
+                totalCollected += amt;
+                cardSalesTotal += amt;
+                byMode.put(mode, byMode.getOrDefault(mode, 0.0) + amt);
+            }
         }
 
         // 4. Return Final JSON

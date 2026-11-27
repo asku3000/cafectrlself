@@ -6,6 +6,7 @@ import com.progameflixx.cafectrl.entity.MembershipCard;
 import com.progameflixx.cafectrl.entity.MembershipCard.Status;
 import com.progameflixx.cafectrl.entity.MembershipLedgerEntry;
 import com.progameflixx.cafectrl.entity.MembershipLedgerEntry.Type;
+import com.progameflixx.cafectrl.entity.MembershipPaymentPart;
 import com.progameflixx.cafectrl.entity.MembershipPlan;
 import com.progameflixx.cafectrl.entity.MembershipSettings;
 import com.progameflixx.cafectrl.entity.User;
@@ -45,6 +46,8 @@ public class MembershipCardService {
     static final Set<String> LOAD_PAYMENT_MODES = Set.of("cash", "upi", "card");
     static final int MAX_START_DAYS_AHEAD = 365;
     static final String SYSTEM_USER = "System";
+    /** payment_mode on a ledger entry paid with more than one mode; the parts are in payment_breakdown. */
+    public static final String SPLIT_MODE = "split";
 
     private final MembershipCardRepository cardRepository;
     private final MembershipLedgerRepository ledgerRepository;
@@ -209,7 +212,7 @@ public class MembershipCardService {
         String name = requireText(req.getCustomerName(), "Customer name", 255);
         String phone = normalisePhone(req.getCustomerPhone());
         MembershipPlan plan = requireSellablePlan(cafeId, req.getPlanId());
-        String mode = requireLoadMode(req.getPaymentMode());
+        List<MembershipPaymentPart> parts = resolvePayments(req.getPayments(), req.getPaymentMode(), plan.getLoadAmountPaise());
         LocalDate start = resolveStartDate(req.getStartDate());
         String note = optionalText(req.getNote(), 500);
 
@@ -229,10 +232,10 @@ public class MembershipCardService {
         card.setIssuedByName(actor.getName());
         cardRepository.save(card);
 
-        postLoad(card, Type.LOAD, plan, mode, key, note, actor);
+        postLoad(card, Type.LOAD, plan, parts, key, note, actor);
         logger.info("Membership card {} ({}) issued to '{}' {} on plan '{}': paid={} bonus={} valid {}..{} via {}",
                 card.getId(), card.getCardNumber(), name, phone, plan.getName(), plan.getLoadAmountPaise(),
-                plan.getBonusAmountPaise(), card.getStartDate(), card.getExpiryDate(), mode);
+                plan.getBonusAmountPaise(), card.getStartDate(), card.getExpiryDate(), parts);
         return card;
     }
 
@@ -260,7 +263,7 @@ public class MembershipCardService {
         }
 
         MembershipPlan plan = requireSellablePlan(cafeId, req.getPlanId());
-        String mode = requireLoadMode(req.getPaymentMode());
+        List<MembershipPaymentPart> parts = resolvePayments(req.getPayments(), req.getPaymentMode(), plan.getLoadAmountPaise());
         LocalDate start = resolveStartDate(req.getStartDate());
         String note = optionalText(req.getNote(), 500);
 
@@ -273,17 +276,19 @@ public class MembershipCardService {
         card.setExpiryDate(start.plusDays(plan.getValidityDays() - 1L));
         card.setPeriodPurchasedAt(now());
 
-        postLoad(card, Type.RECHARGE, plan, mode, key, note, actor);
+        postLoad(card, Type.RECHARGE, plan, parts, key, note, actor);
         logger.info("Membership card {} ({}) recharged on plan '{}': paid={} bonus={} valid {}..{} via {}",
                 card.getId(), card.getCardNumber(), plan.getName(), plan.getLoadAmountPaise(),
-                plan.getBonusAmountPaise(), card.getStartDate(), card.getExpiryDate(), mode);
+                plan.getBonusAmountPaise(), card.getStartDate(), card.getExpiryDate(), parts);
         return card;
     }
 
-    private void postLoad(MembershipCard card, Type loadType, MembershipPlan plan, String mode,
+    /** One ledger entry for the whole sale; payment_breakdown records how it was paid (one or several modes). */
+    private void postLoad(MembershipCard card, Type loadType, MembershipPlan plan, List<MembershipPaymentPart> parts,
                           String key, String note, User actor) {
         post(card, loadType, plan.getLoadAmountPaise(), 0, actor, e -> {
-            e.setPaymentMode(mode);
+            e.setPaymentMode(parts.size() == 1 ? parts.getFirst().getMode() : SPLIT_MODE);
+            e.setPaymentBreakdown(parts);
             e.setPlanId(plan.getId());
             e.setPlanName(plan.getName());
             e.setIdempotencyKey(key);
@@ -358,6 +363,50 @@ public class MembershipCardService {
         card.setExpiryDate(newExpiry);
         post(card, Type.EXPIRY_EXTENDED, 0, 0, admin, e -> e.setNote("Expiry " + old + " -> " + newExpiry + ": " + reason));
         logger.info("Membership card {} expiry extended {} -> {} reason='{}'", cardId, old, newExpiry, reason);
+        return card;
+    }
+
+    /**
+     * Moves the start of the card's current validity period. Expiry moves by the same number of days, so the
+     * period length (including any earlier extension) is kept. Refused when:
+     *  - the card is closed or has already expired (extend the expiry instead);
+     *  - the new start is before the day this period was bought, or more than a year after it;
+     *  - the card was already used on a day before the new start;
+     *  - the new dates would end before today.
+     */
+    @Transactional
+    public MembershipCard changeStartDate(User admin, String cardId, MembershipCardRequests.ChangeStart req) {
+        if (req == null) throw bad("Request body is required");
+        String reason = requireText(req.getReason(), "Reason", 500);
+        LocalDate newStart = req.getNewStartDate();
+        if (newStart == null) throw bad("New start date is required");
+
+        MembershipCard card = lock(admin.getCafeId(), cardId);
+        if (card.getStatus() == Status.CLOSED) throw bad("This card is closed");
+        if (card.effectiveStatus(today()) == Status.EXPIRED) throw bad("This card has expired. Extend its expiry instead");
+
+        LocalDate oldStart = card.getStartDate();
+        if (newStart.equals(oldStart)) throw bad("The card already starts on " + oldStart);
+        LocalDate bought = card.getPeriodPurchasedAt().toLocalDate();
+        if (newStart.isBefore(bought)) throw bad("Start date can't be before the day the card was bought (" + bought + ")");
+        if (newStart.isAfter(bought.plusDays(MAX_START_DAYS_AHEAD))) {
+            throw bad("Start date can be at most " + MAX_START_DAYS_AHEAD + " days after the purchase date");
+        }
+        LocalDate lastUsed = card.getLastUsedAt() == null ? null : card.getLastUsedAt().toLocalDate();
+        if (lastUsed != null && !lastUsed.isBefore(bought) && lastUsed.isBefore(newStart)) {
+            throw bad("The card was already used on " + lastUsed + ", so it can't start after that");
+        }
+        long shift = java.time.temporal.ChronoUnit.DAYS.between(oldStart, newStart);
+        LocalDate oldExpiry = card.getExpiryDate();
+        LocalDate newExpiry = oldExpiry.plusDays(shift);
+        if (newExpiry.isBefore(today())) throw bad("With that start date the card would already have expired on " + newExpiry);
+
+        card.setStartDate(newStart);
+        card.setExpiryDate(newExpiry);
+        post(card, Type.START_DATE_CHANGED, 0, 0, admin, e -> e.setNote(
+                "Valid " + oldStart + ".." + oldExpiry + " -> " + newStart + ".." + newExpiry + ": " + reason));
+        logger.info("Membership card {} start date {} -> {} (expiry {} -> {}) reason='{}'",
+                cardId, oldStart, newStart, oldExpiry, newExpiry, reason);
         return card;
     }
 
@@ -642,6 +691,31 @@ public class MembershipCardService {
                 .orElseThrow(() -> bad("Plan not found"));
         if (!Boolean.TRUE.equals(plan.getIsActive())) throw bad("Plan '" + plan.getName() + "' is not on sale");
         return plan;
+    }
+
+    /**
+     * How a sale / recharge was paid. With {@code payments}: every part must be cash/upi/card with an amount above
+     * zero, parts of the same mode are merged, and the total must equal the plan price exactly (no pending).
+     * Without it, {@code singleMode} pays the full price.
+     */
+    static List<MembershipPaymentPart> resolvePayments(List<MembershipPaymentPart> payments, String singleMode, long pricePaise) {
+        if (payments == null || payments.isEmpty()) {
+            return List.of(new MembershipPaymentPart(requireLoadMode(singleMode), pricePaise));
+        }
+        Map<String, Long> byMode = new LinkedHashMap<>();
+        for (MembershipPaymentPart p : payments) {
+            if (p == null) throw bad("Invalid payment line");
+            String mode = requireLoadMode(p.getMode());
+            if (p.getAmountPaise() == null || p.getAmountPaise() <= 0) throw bad("Each payment amount must be greater than zero");
+            byMode.merge(mode, p.getAmountPaise(), Long::sum);
+        }
+        long total = byMode.values().stream().mapToLong(Long::longValue).sum();
+        if (total != pricePaise) {
+            throw bad("Payments add up to " + rupees(total) + " but the plan price is " + rupees(pricePaise));
+        }
+        List<MembershipPaymentPart> parts = new ArrayList<>();
+        byMode.forEach((m, a) -> parts.add(new MembershipPaymentPart(m, a)));
+        return parts;
     }
 
     private static String requireLoadMode(String raw) {

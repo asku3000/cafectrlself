@@ -89,7 +89,8 @@ public class MembershipCardController {
                 "card_number", card.getCardNumber(), "customer", card.getCustomerName(),
                 "plan", card.getPlanName(), "paid_paise", card.getPlanLoadAmountPaise(),
                 "bonus_paise", card.getPlanBonusAmountPaise(),
-                "payment_mode", String.valueOf(req.getPaymentMode())));
+                "payments", req.getPayments() != null && !req.getPayments().isEmpty()
+                        ? req.getPayments() : String.valueOf(req.getPaymentMode())));
         return cardService.toView(card);
     }
 
@@ -101,7 +102,8 @@ public class MembershipCardController {
         auditService.log(auth, "MEMBERSHIP_CARD_RECHARGE", card.getId(), Map.of(
                 "card_number", card.getCardNumber(), "plan", card.getPlanName(),
                 "paid_paise", card.getPlanLoadAmountPaise(), "bonus_paise", card.getPlanBonusAmountPaise(),
-                "payment_mode", String.valueOf(req.getPaymentMode())));
+                "payments", req.getPayments() != null && !req.getPayments().isEmpty()
+                        ? req.getPayments() : String.valueOf(req.getPaymentMode())));
         return cardService.toView(card);
     }
 
@@ -126,6 +128,17 @@ public class MembershipCardController {
         auditService.log(auth, "MEMBERSHIP_CARD_EXTEND", card.getId(), Map.of(
                 "card_number", card.getCardNumber(), "new_expiry", String.valueOf(card.getExpiryDate()),
                 "reason", req.getReason()));
+        return cardService.toView(card);
+    }
+
+    @PostMapping("/{id}/start-date")
+    @PreAuthorize("hasRole('CAFE_ADMIN')")
+    public MembershipCardView changeStartDate(@PathVariable String id, @RequestBody MembershipCardRequests.ChangeStart req, Authentication auth) {
+        User user = currentUser.require(auth);
+        MembershipCard card = cardService.changeStartDate(user, id, req);
+        auditService.log(auth, "MEMBERSHIP_CARD_START_DATE", card.getId(), Map.of(
+                "card_number", card.getCardNumber(), "new_start", String.valueOf(card.getStartDate()),
+                "new_expiry", String.valueOf(card.getExpiryDate()), "reason", req.getReason()));
         return cardService.toView(card);
     }
 

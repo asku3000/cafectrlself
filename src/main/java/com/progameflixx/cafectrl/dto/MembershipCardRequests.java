@@ -19,9 +19,11 @@ public final class MembershipCardRequests {
         private String customerPhone;
         @JsonProperty("plan_id")
         private String planId;
-        /** cash | upi | card */
+        /** cash | upi | card. Shortcut for paying the full price with one mode; ignored when payments is given. */
         @JsonProperty("payment_mode")
         private String paymentMode;
+        /** How the price was paid, e.g. [{mode: upi, amount_paise: 60000}, {mode: cash, amount_paise: 40000}]. Must add up to the plan price. */
+        private java.util.List<com.progameflixx.cafectrl.entity.MembershipPaymentPart> payments;
         /** First day the card can be used; defaults to today, may not be before today. */
         @JsonProperty("start_date")
         private LocalDate startDate;
@@ -37,6 +39,7 @@ public final class MembershipCardRequests {
         private String planId;
         @JsonProperty("payment_mode")
         private String paymentMode;
+        private java.util.List<com.progameflixx.cafectrl.entity.MembershipPaymentPart> payments;
         @JsonProperty("start_date")
         private LocalDate startDate;
         @JsonProperty("request_id")
@@ -64,6 +67,14 @@ public final class MembershipCardRequests {
     public static class Extend {
         @JsonProperty("new_expiry_date")
         private LocalDate newExpiryDate;
+        private String reason;
+    }
+
+    /** Admin: move the start of the current validity period; expiry moves by the same number of days. */
+    @Data
+    public static class ChangeStart {
+        @JsonProperty("new_start_date")
+        private LocalDate newStartDate;
         private String reason;
     }
 
