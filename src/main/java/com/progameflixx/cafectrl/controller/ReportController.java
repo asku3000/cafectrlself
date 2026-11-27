@@ -49,6 +49,9 @@ public class ReportController {
     @Autowired
     private PendingPaymentRepository pendingPaymentRepository;
 
+    @Autowired
+    private com.progameflixx.cafectrl.service.MembershipReportService membershipReportService;
+
     private String getCafeId(Authentication auth) {
         String cafeId = userRepository.findByEmail(auth.getName()).orElseThrow().getCafeId();
         LogContext.putCafeId(cafeId);
@@ -112,8 +115,9 @@ public class ReportController {
                     // Track all modes (including pending so it shows in the UI grid)
                     byMode.put(mode, byMode.getOrDefault(mode, 0.0) + amt);
 
-                    // Add to true collected revenue ONLY if it isn't "pending"
-                    if (!mode.contains("pending")) {
+                    // Add to true collected revenue ONLY if it isn't "pending", and not "membership":
+                    // card payments spend money that was already collected when the card was sold
+                    if (!mode.contains("pending") && !"membership".equals(mode)) {
                         totalCollected += amt;
                     }
                 }
@@ -199,9 +203,27 @@ public class ReportController {
             return (t1 != null && t2 != null) ? t2.compareTo(t1) : 0;
         });
 
+        // 2.6 Membership cards sold / recharged today: real money in the drawer, by the mode it was paid with.
+        // (Card payments on bills are excluded above, so the same money is never counted twice.)
+        List<com.progameflixx.cafectrl.service.MembershipReportService.Sale> cardSales =
+                membershipReportService.salesOn(cafeId, date);
+        double cardSalesTotal = 0.0;
+        for (com.progameflixx.cafectrl.service.MembershipReportService.Sale sale : cardSales) {
+            // A sale may be split across modes (e.g. part UPI, part cash): credit each part to its own mode
+            for (com.progameflixx.cafectrl.entity.MembershipPaymentPart part : sale.payments()) {
+                double amt = com.progameflixx.cafectrl.entity.MembershipMath.paiseToRupees(part.getAmountPaise());
+                String mode = part.getMode() != null ? part.getMode().toLowerCase() : "cash";
+                totalCollected += amt;
+                cardSalesTotal += amt;
+                byMode.put(mode, byMode.getOrDefault(mode, 0.0) + amt);
+            }
+        }
+
         // 4. Return Final JSON
         Map<String, Object> resp = new HashMap<>();
         resp.put("date", date.toString());
+        resp.put("membership_sales", cardSales);
+        resp.put("membership_sales_total", Math.round(cardSalesTotal * 100.0) / 100.0);
         resp.put("total", Math.round(totalCollected * 100.0) / 100.0); // Now perfectly reflects true cash in drawer
         resp.put("by_mode", byMode);
         resp.put("by_item", byItem);
@@ -335,6 +357,13 @@ public class ReportController {
         resp.put("by_game_day", byGameDay);   // Fixes Stacked Bar (Games)
         resp.put("by_item_day", byItemDay);   // Fixes Stacked Bar (Items)
         resp.put("pending_total_cleared", monthlyPendingTotalCleared);
+        // Membership card sales are reported separately: "total" is the sum of bills, which already includes
+        // bills paid by card, so adding card sales to it would count the same money twice.
+        com.progameflixx.cafectrl.service.MembershipReportService.Report cardReport =
+                membershipReportService.report(cafeId, startOfMonth, endOfMonth);
+        resp.put("membership_sales_total", com.progameflixx.cafectrl.entity.MembershipMath.paiseToRupees(cardReport.collectedPaise()));
+        resp.put("membership_cards_sold", cardReport.newCards());
+        resp.put("membership_recharges", cardReport.recharges());
         logger.info("Monthly report {}-{}: sessions={} revenue={} pendingCleared={}",
                 year, month, sessions.size(), resp.get("total"), monthlyPendingTotalCleared);
         // Note: We deliberately do NOT return the "sessions" list here because a

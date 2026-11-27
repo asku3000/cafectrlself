@@ -7,6 +7,7 @@ import com.progameflixx.cafectrl.entity.*;
 import com.progameflixx.cafectrl.logging.LogContext;
 import com.progameflixx.cafectrl.repository.*;
 import com.progameflixx.cafectrl.service.BillingService;
+import com.progameflixx.cafectrl.service.SessionBillingService;
 import jakarta.transaction.Transactional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -55,6 +56,15 @@ public class SessionController {
     @Autowired
     private com.progameflixx.cafectrl.service.AuditService auditService;
 
+    @Autowired
+    private com.progameflixx.cafectrl.service.SessionMembershipService sessionMembershipService;
+
+    @Autowired
+    private com.progameflixx.cafectrl.service.SessionBillingService sessionBillingService;
+
+    @Autowired
+    private com.progameflixx.cafectrl.service.CurrentUserService currentUserService;
+
     private String getCafeId(Authentication auth) {
         String cafeId = userRepository.findByEmail(auth.getName()).orElseThrow().getCafeId();
         LogContext.putCafeId(cafeId);
@@ -65,7 +75,7 @@ public class SessionController {
     public List<CustomerSession> getActiveSessions(Authentication auth) {
         List<CustomerSession> active = sessionRepository.findByCafeIdAndStatus(getCafeId(auth), "active");
         logger.debug("Fetched {} active session(s)", active.size());
-        return active;
+        return sessionMembershipService.attachCards(active);
     }
 
     @PostMapping
@@ -83,9 +93,18 @@ public class SessionController {
 
         // --- INSIDE startSession() ---
 
+        // Optional membership card: validated before anything is saved, so a bad card never leaves a half-started session
+        String cardId = payload.get("membership_card_id") instanceof String s && !s.isBlank() ? s : null;
+        MembershipCard taggedCard = cardId == null ? null : sessionMembershipService.requireTaggable(cafeId, cardId);
+
         CustomerSession session = new CustomerSession();
         session.setCafeId(cafeId);
         session.setCustomerName((String) payload.get("customer_name"));
+        // The UI has always sent the phone; it was previously dropped here and never saved
+        if (payload.get("customer_phone") instanceof String phone && !phone.isBlank()) {
+            session.setCustomerPhone(phone.trim());
+        }
+        session.setMembershipCardId(taggedCard != null ? taggedCard.getId() : null);
         session.setOperatorName(userRepository.findByEmail(auth.getName()).get().getName());
         session.setCreatedAt(LocalDateTime.now());
         session.setStatus("active");
@@ -113,88 +132,91 @@ public class SessionController {
                 saved.getId(), saved.getCustomerName(), game.getResourceName(), game.getId(),
                 game.getPlayerCount(), game.getStartTime());
         // RECORD AUDIT
-        auditService.log(auth, "SESSION_START", saved.getId(), Map.of(
-                "customer", saved.getCustomerName(),
-                "resource", game.getResourceName()
-        ));
-        return ResponseEntity.ok(saved);
+        Map<String, Object> startMeta = new java.util.HashMap<>();
+        startMeta.put("customer", saved.getCustomerName());
+        startMeta.put("resource", game.getResourceName());
+        if (taggedCard != null) startMeta.put("membership_card", taggedCard.getCardNumber());
+        auditService.log(auth, "SESSION_START", saved.getId(), startMeta);
+        return ResponseEntity.ok(sessionMembershipService.attachCard(saved));
     }
 
     @GetMapping("/{sid}/bill")
-    public ResponseEntity<?> previewBill(@PathVariable String sid, Authentication auth) {
+    public ResponseEntity<?> previewBill(@PathVariable String sid,
+                                         @RequestParam(name = "custom_time", required = false) String customTime,
+                                         Authentication auth) {
         CustomerSession session = sessionRepository.findById(sid).orElse(null);
         if (session == null || !session.getCafeId().equals(getCafeId(auth))) {
             logger.warn("Bill preview: session {} not found in this cafe", sid);
             return ResponseEntity.notFound().build();
         }
 
-        Map<String, Object> bill = billingService.computeSessionBill(session);
-        logger.info("Bill preview for session {} ('{}'): grand_total={}", sid, session.getCustomerName(), bill.get("grand_total"));
+        // Backdated preview: price still-running games up to the chosen time (previously this param was ignored,
+        // so the preview showed the live total while checkout billed the backdated one)
+        LocalDateTime endOverride = null;
+        if (customTime != null && !customTime.isBlank()) {
+            try {
+                endOverride = LocalDateTime.parse(customTime.trim(), DateTimeFormatter.ISO_LOCAL_DATE_TIME);
+            } catch (java.time.format.DateTimeParseException e) {
+                return ResponseEntity.badRequest().body(Map.of("detail", "Invalid custom_time"));
+            }
+        }
+        // Price running games up to one fixed instant and return it, so a card-paid checkout can close at exactly
+        // the amount the staff saw (otherwise a billing block could tick over between preview and close)
+        LocalDateTime pricedUntil = (endOverride != null ? endOverride : LocalDateTime.now()).withNano(0);
+        Map<String, Object> bill = billingService.computeSessionBill(session, pricedUntil);
+        bill.put("priced_until", pricedUntil.toString());
+        logger.info("Bill preview for session {} ('{}'): grand_total={} customTime={}", sid, session.getCustomerName(),
+                bill.get("grand_total"), endOverride);
         return ResponseEntity.ok(bill);
     }
 
-    // --- CHECKOUT ---
+    // --- CHECKOUT (one transaction: bill + optional membership card payment) ---
     @PostMapping("/{sid}/checkout")
     public ResponseEntity<?> checkout(@PathVariable String sid, @RequestBody CheckoutRequest req, Authentication auth) {
-        CustomerSession session = sessionRepository.findById(sid).orElse(null);
-        if (session == null || !session.getCafeId().equals(getCafeId(auth))) {
-            logger.warn("Checkout: session {} not found in this cafe", sid);
-            return ResponseEntity.notFound().build();
-        }
-        logger.info("Checkout requested for session {} ('{}', status={}): adjustment={} manualBilledAt={} payments={}",
-                sid, session.getCustomerName(), session.getStatus(), req.getAdjustment(), req.getManualBilledAt(), req.getPayments());
-
-        LocalDateTime effectiveClosingTime = (req.getManualBilledAt() != null)
-                ? req.getManualBilledAt()
-                : LocalDateTime.now();
-
-        for (GameSession g : session.getGames()) {
-            if ("active".equals(g.getStatus())) {
-                g.setStatus("soft_closed");
-                g.setEndTime(effectiveClosingTime);
-            }
-        }
-
-        // Let Spring do the heavy lifting! No ObjectMapper needed.
-        session.setAdjustment(req.getAdjustment() != null ? req.getAdjustment() : 0.0);
-
-        Map<String, Object> bill = billingService.computeSessionBill(session);
-        double grandTotal = (Double) bill.get("grand_total");
-
-        session.setStatus("billed");
-        session.setBilledAt(effectiveClosingTime);
-        session.setBillTotal(grandTotal);
-        if (req.getNotes() != null) {
-            session.setNotes(req.getNotes());
-        }
-        // Simply set the payments directly from the perfectly mapped request object
-        if (req.getPayments() != null) {
-            session.setPayments(req.getPayments());
-        }
-        CustomerSession saved = sessionRepository.save(session);
-        logger.info("Session {} billed: total={} billedAt={}", saved.getId(), grandTotal, effectiveClosingTime);
+        User actor = currentUserService.require(auth);
+        SessionBillingService.CheckoutResult result = sessionBillingService.checkout(actor, sid, req);
+        CustomerSession saved = result.session();
         // RECORD AUDIT
-        auditService.log(auth, "SESSION_CHECKOUT", saved.getId(), Map.of(
-                "customer", saved.getCustomerName(),
-                "total", saved.getBillTotal(),
-                "payments", saved.getPayments()
-        ));
-        for (PaymentSplit p : req.getPayments()) {
-            if ("pending".equalsIgnoreCase(p.getMode())) {
-                PendingPayment debt = new PendingPayment();
-                debt.setSessionId(session.getId());
-                debt.setCafeId(session.getCafeId());
-                debt.setCustomerName(session.getCustomerName());
-                debt.setCustomerPhone(session.getCustomerPhone());
-                debt.setAmount(p.getAmount());
-                debt.setStatus("PENDING");
-                debt.setCreatedAt(LocalDateTime.now());
-                pendingPaymentRepository.save(debt);
-                logger.info("Pending payment {} created for session {} ('{}'): amount={}",
-                        debt.getId(), session.getId(), session.getCustomerName(), debt.getAmount());
-            }
-        }
-        return ResponseEntity.ok(saved);
+        Map<String, Object> meta = new java.util.HashMap<>();
+        meta.put("customer", saved.getCustomerName());
+        meta.put("total", saved.getBillTotal());
+        meta.put("payments", saved.getPayments());
+        if (result.cardPayment() != null) meta.put("membership_card", result.cardPayment().getCardNumber());
+        auditService.log(auth, "SESSION_CHECKOUT", saved.getId(), meta);
+        return ResponseEntity.ok(sessionMembershipService.attachCard(saved));
+    }
+
+    // --- REOPEN A BILLED SESSION (admin): reverses card payments, voids unpaid debts, back to unbilled ---
+    @PostMapping("/{sid}/reopen")
+    @PreAuthorize("hasRole('CAFE_ADMIN')")
+    public ResponseEntity<?> reopenBill(@PathVariable String sid, @RequestBody Map<String, String> body, Authentication auth) {
+        User admin = currentUserService.require(auth);
+        SessionBillingService.UndoResult r = sessionBillingService.reopen(admin, sid, body.get("reason"));
+        auditService.log(auth, "SESSION_BILL_REOPEN", sid, undoMeta(r, body.get("reason")));
+        return ResponseEntity.ok(sessionMembershipService.attachCard(r.session()));
+    }
+
+    // --- VOID A BILLED SESSION (admin): reverses card payments, voids unpaid debts, out of revenue ---
+    @PostMapping("/{sid}/void")
+    @PreAuthorize("hasRole('CAFE_ADMIN')")
+    public ResponseEntity<?> voidBill(@PathVariable String sid, @RequestBody Map<String, String> body, Authentication auth) {
+        User admin = currentUserService.require(auth);
+        SessionBillingService.UndoResult r = sessionBillingService.voidBill(admin, sid, body.get("reason"));
+        auditService.log(auth, "SESSION_BILL_VOID", sid, undoMeta(r, body.get("reason")));
+        return ResponseEntity.ok(sessionMembershipService.attachCard(r.session()));
+    }
+
+    private static Map<String, Object> undoMeta(SessionBillingService.UndoResult r, String reason) {
+        Map<String, Object> meta = new java.util.HashMap<>();
+        meta.put("customer", r.session().getCustomerName());
+        meta.put("total", r.session().getBillTotal());
+        meta.put("reason", reason);
+        meta.put("voided_pending_debts", r.voidedDebts());
+        meta.put("card_reversals", r.reversals().stream()
+                .map(x -> Map.of("card_number", x.cardNumber(), "credited_paise", x.creditedPaise(),
+                        "re_forfeited_paise", x.reForfeitedPaise()))
+                .toList());
+        return meta;
     }
 
     // --- GET SINGLE SESSION ---
@@ -209,7 +231,42 @@ public class SessionController {
         }
 
         logger.debug("Fetched session {} (status={})", sid, session.getStatus());
-        return ResponseEntity.ok(session);
+        return ResponseEntity.ok(sessionMembershipService.attachCard(session));
+    }
+
+    // --- MEMBERSHIP CARD: tag / change / remove while the session is running (until billing) ---
+    @PutMapping("/{sid}/membership-card")
+    public ResponseEntity<?> setMembershipCard(@PathVariable String sid, @RequestBody Map<String, Object> payload, Authentication auth) {
+        String cafeId = getCafeId(auth);
+        CustomerSession session = sessionRepository.findById(sid).orElse(null);
+        if (session == null || !session.getCafeId().equals(cafeId)) {
+            logger.warn("Set membership card: session {} not found in this cafe", sid);
+            return ResponseEntity.notFound().build();
+        }
+        if (!"active".equals(session.getStatus())) {
+            logger.warn("Set membership card rejected: session {} is {}", sid, session.getStatus());
+            return ResponseEntity.badRequest().body(Map.of("detail", "The card can only be changed before the session is billed"));
+        }
+
+        String cardId = payload.get("membership_card_id") instanceof String s && !s.isBlank() ? s : null;
+        String previous = session.getMembershipCardId();
+        MembershipCard card = cardId == null ? null : sessionMembershipService.requireTaggable(cafeId, cardId);
+        session.setMembershipCardId(card != null ? card.getId() : null);
+        CustomerSession saved = sessionRepository.save(session);
+        logger.info("Session {} membership card {} -> {}", sid, previous, saved.getMembershipCardId());
+
+        Map<String, Object> meta = new java.util.HashMap<>();
+        meta.put("customer", saved.getCustomerName());
+        meta.put("previous_card_id", previous);
+        meta.put("membership_card", card != null ? card.getCardNumber() : null);
+        auditService.log(auth, card != null ? "SESSION_MEMBERSHIP_TAG" : "SESSION_MEMBERSHIP_UNTAG", sid, meta);
+        return ResponseEntity.ok(sessionMembershipService.attachCard(saved));
+    }
+
+    // --- MEMBERSHIP CARD LOOKUP for the session screens (search by name, phone or card number) ---
+    @GetMapping("/membership-cards/lookup")
+    public ResponseEntity<?> lookupMembershipCards(@RequestParam(name = "q", required = false) String q, Authentication auth) {
+        return ResponseEntity.ok(sessionMembershipService.lookup(getCafeId(auth), q));
     }
 
     // --- ADD ANOTHER GAME TO EXISTING SESSION ---
