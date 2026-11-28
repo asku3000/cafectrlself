@@ -16,6 +16,7 @@ import java.util.Map;
  */
 @Aspect
 @Component
+@org.springframework.core.annotation.Order(1) // outside the idempotency aspect: failures are audited, replays are not
 public class AuditFailureAspect {
 
     private final AuditService audit;

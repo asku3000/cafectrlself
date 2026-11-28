@@ -1,5 +1,6 @@
 package com.progameflixx.cafectrl.controller;
 
+import com.progameflixx.cafectrl.idempotency.Idempotent;
 import com.progameflixx.cafectrl.dto.MembershipPlanRequest;
 import com.progameflixx.cafectrl.dto.MembershipSettingsRequest;
 import com.progameflixx.cafectrl.entity.MembershipPlan;
@@ -48,6 +49,7 @@ public class MembershipPlanController {
     }
 
     @Audited(action = AuditActions.MEMBERSHIP_PLAN_CREATED, entityType = AuditActions.ENTITY_MEMBERSHIP_PLAN)
+    @Idempotent("PLAN_CREATE")
     @PostMapping("/plans")
     @PreAuthorize("hasRole('CAFE_ADMIN')")
     public MembershipPlan createPlan(@RequestBody MembershipPlanRequest req, Authentication auth) {
@@ -57,6 +59,7 @@ public class MembershipPlanController {
     }
 
     @Audited(action = AuditActions.MEMBERSHIP_PLAN_UPDATED, entityType = AuditActions.ENTITY_MEMBERSHIP_PLAN, entityIdParam = "id")
+    @Idempotent("PLAN_UPDATE")
     @PutMapping("/plans/{id}")
     @PreAuthorize("hasRole('CAFE_ADMIN')")
     public MembershipPlan updatePlan(@PathVariable String id, @RequestBody MembershipPlanRequest req, Authentication auth) {
@@ -66,6 +69,7 @@ public class MembershipPlanController {
     }
 
     @Audited(action = "MEMBERSHIP_PLAN_STATUS_CHANGE", entityType = AuditActions.ENTITY_MEMBERSHIP_PLAN, entityIdParam = "id")
+    @Idempotent("PLAN_STATUS")
     @PatchMapping("/plans/{id}/active")
     @PreAuthorize("hasRole('CAFE_ADMIN')")
     public MembershipPlan setPlanActive(@PathVariable String id, @RequestBody Map<String, Boolean> body, Authentication auth) {
@@ -81,6 +85,7 @@ public class MembershipPlanController {
     }
 
     @Audited(action = AuditActions.MEMBERSHIP_SETTINGS_UPDATED, entityType = AuditActions.ENTITY_MEMBERSHIP_SETTINGS)
+    @Idempotent("MEMBERSHIP_SETTINGS_UPDATE")
     @PutMapping("/settings")
     @PreAuthorize("hasRole('CAFE_ADMIN')")
     public MembershipSettings updateSettings(@RequestBody MembershipSettingsRequest req, Authentication auth) {

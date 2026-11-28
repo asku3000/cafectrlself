@@ -237,10 +237,9 @@ class AuditInstrumentationTest {
         String resId = resource();
         only(AuditActions.ENTITY_RESOURCE, resId, AuditActions.RESOURCE_CREATED);
         String otherCard = rateCard();
-        String body = call(post("/api/resources"), """
-                {"id":"%s","name":"%s","rate_card_id":"%s","is_active":true}
-                """.formatted(resId, JsonPath.read(call(get("/api/resources"), null, 200), "$[?(@.id=='" + resId + "')].name").toString()
-                .replaceAll("[\\[\\]\"]", ""), otherCard), 200);
+        String body = call(put("/api/resources/" + resId), """
+                {"rate_card_id":"%s"}
+                """.formatted(otherCard), 200);
         assertNotNull(body);
         AuditEvent updated = only(AuditActions.ENTITY_RESOURCE, resId, AuditActions.RESOURCE_UPDATED);
         assertEquals(Set.of("rate_card_id"), updated.getChanges().keySet());

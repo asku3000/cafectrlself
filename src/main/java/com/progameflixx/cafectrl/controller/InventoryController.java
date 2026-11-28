@@ -1,5 +1,6 @@
 package com.progameflixx.cafectrl.controller;
 
+import com.progameflixx.cafectrl.idempotency.Idempotent;
 import com.progameflixx.cafectrl.audit.AuditActions;
 import com.progameflixx.cafectrl.audit.AuditDiff;
 import com.progameflixx.cafectrl.audit.AuditFormat;
@@ -93,6 +94,7 @@ public class InventoryController {
                 .collect(Collectors.toList());
     }
 
+    @Idempotent("INVENTORY_CREATE")
     @PostMapping
     @Audited(action = AuditActions.INVENTORY_ITEM_CREATED, entityType = AuditActions.ENTITY_INVENTORY)
     public InventoryItem createInventory(@RequestBody InventoryRequestDTO request, Authentication auth) {
@@ -150,10 +152,11 @@ public class InventoryController {
         }
     }
 
+    @Idempotent("INVENTORY_UPDATE")
     @PutMapping("/{iid}")
     @Audited(action = AuditActions.INVENTORY_ITEM_UPDATED, entityType = AuditActions.ENTITY_INVENTORY, entityIdParam = "iid")
     public ResponseEntity<?> updateInventory(@PathVariable String iid, @RequestBody InventoryItem updates, Authentication auth) {
-        InventoryItem existing = inventoryRepository.findById(iid).orElse(null);
+        InventoryItem existing = inventoryRepository.findForUpdate(iid).orElse(null);
         if (existing == null || !existing.getCafeId().equals(getCafeId(auth))) {
             logger.warn("Update inventory: item {} not found in this cafe", iid);
             return ResponseEntity.notFound().build();
@@ -205,10 +208,11 @@ public class InventoryController {
         return ResponseEntity.ok(saved);
     }
 
+    @Idempotent("INVENTORY_DELETE")
     @DeleteMapping("/{iid}")
     @Audited(action = AuditActions.INVENTORY_ITEM_DELETED, entityType = AuditActions.ENTITY_INVENTORY, entityIdParam = "iid")
     public ResponseEntity<?> deleteInventory(@PathVariable String iid, Authentication auth) {
-        InventoryItem existing = inventoryRepository.findById(iid).orElse(null);
+        InventoryItem existing = inventoryRepository.findForUpdate(iid).orElse(null);
         if (existing == null || !existing.getCafeId().equals(getCafeId(auth))) {
             logger.warn("Delete inventory: item {} not found in this cafe", iid);
             return ResponseEntity.notFound().build();

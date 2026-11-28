@@ -6,6 +6,7 @@ import com.progameflixx.cafectrl.audit.AuditActions;
 import com.progameflixx.cafectrl.audit.AuditFormat;
 import com.progameflixx.cafectrl.audit.AuditRecord;
 import com.progameflixx.cafectrl.audit.Audited;
+import com.progameflixx.cafectrl.idempotency.Idempotent;
 import com.progameflixx.cafectrl.dto.CheckoutRequest;
 import com.progameflixx.cafectrl.entity.*;
 import com.progameflixx.cafectrl.logging.LogContext;
@@ -87,17 +88,19 @@ public class SessionController {
 
     @PostMapping
     @Audited(action = AuditActions.SESSION_STARTED, entityType = AuditActions.ENTITY_SESSION)
+    @Idempotent("SESSION_START")
     public ResponseEntity<?> startSession(@RequestBody Map<String, Object> payload, Authentication auth) {
         String cafeId = getCafeId(auth);
         String resourceId = (String) payload.get("resource_id");
         logger.info("Start session requested: customer='{}' resource={} players={} start_time={}",
                 payload.get("customer_name"), resourceId, payload.get("player_count"), payload.get("start_time"));
 
-        Resource resource = resourceRepository.findById(resourceId).orElse(null);
+        Resource resource = resourceId == null ? null : resourceRepository.findForUpdate(resourceId).orElse(null);
         if (resource == null || !resource.getCafeId().equals(cafeId)) {
             logger.warn("Start session rejected: resource {} not found in this cafe", resourceId);
             return ResponseEntity.badRequest().body("Resource not found");
         }
+        requireResourceFree(cafeId, resource);
 
         // --- INSIDE startSession() ---
 
@@ -186,6 +189,7 @@ public class SessionController {
     // --- CHECKOUT (one transaction: bill + optional membership card payment) ---
     @PostMapping("/{sid}/checkout")
     @Audited(action = AuditActions.BILL_CREATED, entityType = AuditActions.ENTITY_SESSION, entityIdParam = "sid")
+    @Idempotent("SESSION_CHECKOUT")
     public ResponseEntity<?> checkout(@PathVariable String sid, @RequestBody CheckoutRequest req, Authentication auth) {
         User actor = currentUserService.require(auth);
         SessionBillingService.CheckoutResult result = sessionBillingService.checkout(actor, sid, req);
@@ -198,6 +202,7 @@ public class SessionController {
     @PostMapping("/{sid}/reopen")
     @PreAuthorize("hasRole('CAFE_ADMIN')")
     @Audited(action = AuditActions.BILL_REOPENED, entityType = AuditActions.ENTITY_SESSION, entityIdParam = "sid")
+    @Idempotent("BILL_REOPEN")
     public ResponseEntity<?> reopenBill(@PathVariable String sid, @RequestBody Map<String, String> body, Authentication auth) {
         User admin = currentUserService.require(auth);
         SessionBillingService.UndoResult r = sessionBillingService.reopen(admin, sid, body.get("reason"));
@@ -208,6 +213,7 @@ public class SessionController {
     @PostMapping("/{sid}/void")
     @PreAuthorize("hasRole('CAFE_ADMIN')")
     @Audited(action = AuditActions.BILL_VOIDED, entityType = AuditActions.ENTITY_SESSION, entityIdParam = "sid")
+    @Idempotent("BILL_VOID")
     public ResponseEntity<?> voidBill(@PathVariable String sid, @RequestBody Map<String, String> body, Authentication auth) {
         User admin = currentUserService.require(auth);
         SessionBillingService.UndoResult r = sessionBillingService.voidBill(admin, sid, body.get("reason"));
@@ -232,6 +238,7 @@ public class SessionController {
     // --- MEMBERSHIP CARD: tag / change / remove while the session is running (until billing) ---
     @PutMapping("/{sid}/membership-card")
     @Audited(action = AuditActions.SESSION_CARD_TAGGED, entityType = AuditActions.ENTITY_SESSION, entityIdParam = "sid")
+    @Idempotent("SESSION_SET_CARD")
     public ResponseEntity<?> setMembershipCard(@PathVariable String sid, @RequestBody Map<String, Object> payload, Authentication auth) {
         String cafeId = getCafeId(auth);
         CustomerSession session = sessionRepository.findById(sid).orElse(null);
@@ -275,6 +282,7 @@ public class SessionController {
     // --- ADD ANOTHER GAME TO EXISTING SESSION ---
     @PostMapping("/{sid}/games")
     @Audited(action = AuditActions.SESSION_GAME_ADDED, entityType = AuditActions.ENTITY_SESSION, entityIdParam = "sid")
+    @Idempotent("SESSION_ADD_GAME")
     public ResponseEntity<?> addGameToSession(@PathVariable String sid, @RequestBody Map<String, Object> payload, Authentication auth) {
         String cafeId = getCafeId(auth);
         CustomerSession session = sessionRepository.findById(sid).orElse(null);
@@ -293,11 +301,12 @@ public class SessionController {
             return ResponseEntity.badRequest().body("Session is not active");
         }
 
-        Resource resource = resourceRepository.findById(resourceId).orElse(null);
+        Resource resource = resourceId == null ? null : resourceRepository.findForUpdate(resourceId).orElse(null);
         if (resource == null || !resource.getCafeId().equals(cafeId)) {
             logger.warn("Add game rejected: resource {} not found in this cafe", resourceId);
             return ResponseEntity.badRequest().body("Resource not found");
         }
+        requireResourceFree(cafeId, resource);
 
         GameSession game = new GameSession();
         game.setResourceId(resource.getId());
@@ -330,6 +339,7 @@ public class SessionController {
     // --- END A SPECIFIC GAME (Keep session open) ---
     @PostMapping("/{sid}/games/{gid}/end")
     @Audited(action = AuditActions.SESSION_GAME_ENDED, entityType = AuditActions.ENTITY_SESSION, entityIdParam = "sid")
+    @Idempotent("SESSION_END_GAME")
     public ResponseEntity<?> endGame(@PathVariable String sid, @PathVariable String gid, @RequestBody Map<String, Object> payload, Authentication auth) {
         CustomerSession session = sessionRepository.findById(sid).orElse(null);
         if (session == null || !session.getCafeId().equals(getCafeId(auth))) {
@@ -358,7 +368,11 @@ public class SessionController {
             }
         }
         if (!ended) {
-            logger.warn("End game: game {} in session {} not found or not active - nothing changed", gid, sid);
+            boolean exists = session.getGames().stream().anyMatch(g -> g.getId().equals(gid));
+            logger.warn("End game rejected: game {} in session {} {}", gid, sid, exists ? "already ended" : "not found");
+            throw new org.springframework.web.server.ResponseStatusException(
+                    exists ? org.springframework.http.HttpStatus.CONFLICT : org.springframework.http.HttpStatus.NOT_FOUND,
+                    exists ? "This game has already ended" : "Game not found");
         }
         return ResponseEntity.ok(sessionRepository.save(session));
     }
@@ -366,12 +380,14 @@ public class SessionController {
     // --- FORCE CANCEL SESSION (Admin override, no bill) ---
     @PostMapping("/{sid}/cancel")
     @Audited(action = AuditActions.SESSION_CANCELLED, entityType = AuditActions.ENTITY_SESSION, entityIdParam = "sid")
+    @Idempotent("SESSION_CANCEL")
     public ResponseEntity<?> cancelSession(@PathVariable String sid, Authentication auth) {
-        CustomerSession session = sessionRepository.findById(sid).orElse(null);
+        CustomerSession session = sessionRepository.findForUpdate(sid).orElse(null);
         if (session == null || !session.getCafeId().equals(getCafeId(auth))) {
             logger.warn("Cancel: session {} not found in this cafe", sid);
             return ResponseEntity.notFound().build();
         }
+        requireActive(session, "cancelled");
         logger.info("Cancel requested for session {} ('{}', status={})", sid, session.getCustomerName(), session.getStatus());
 
         LocalDateTime now = LocalDateTime.now();
@@ -415,6 +431,27 @@ public class SessionController {
         return ResponseEntity.ok(cancelled);
     }
 
+    /** A station can have only one running game at a time. Call with the resource row locked. */
+    private void requireResourceFree(String cafeId, Resource resource) {
+        for (CustomerSession s : sessionRepository.findByCafeIdAndStatus(cafeId, "active")) {
+            for (GameSession g : s.getGames()) {
+                if ("active".equals(g.getStatus()) && resource.getId().equals(g.getResourceId())) {
+                    logger.warn("Start on {} rejected: already in use by session {} ('{}')", resource.getName(), s.getId(), s.getCustomerName());
+                    throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.CONFLICT,
+                            resource.getName() + " is already in use by " + s.getCustomerName());
+                }
+            }
+        }
+    }
+
+    /** Refuses changes to a session that is no longer running (billed, cancelled, voided). */
+    private void requireActive(CustomerSession session, String verb) {
+        if (!"active".equals(session.getStatus())) {
+            throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.CONFLICT,
+                    "This session is already " + session.getStatus() + " and can't be " + verb);
+        }
+    }
+
     private void restoreStock(InventoryItem returnedItem, int quantityReturned) {
         if (Boolean.TRUE.equals(returnedItem.getIsTrackable())) {
             // 1. It's a direct trackable item (e.g., a Can of Coke)
@@ -445,6 +482,7 @@ public class SessionController {
     @org.springframework.transaction.annotation.Transactional
     @PostMapping("/{sid}/games/{gid}/items")
     @Audited(action = AuditActions.SESSION_ITEM_ADDED, entityType = AuditActions.ENTITY_SESSION, entityIdParam = "sid")
+    @Idempotent("SESSION_ADD_ITEM")
     public ResponseEntity<?> addItem(@PathVariable String sid, @PathVariable String gid, @RequestBody Map<String, Object> req, Authentication auth) {
         String cafeId = getCafeId(auth);
         CustomerSession session = sessionRepository.findById(sid).orElse(null);
@@ -456,6 +494,7 @@ public class SessionController {
             logger.warn("Add item: session {} not found in this cafe", sid);
             return ResponseEntity.status(404).body(Map.of("message", "Session not found"));
         }
+        requireActive(session, "changed");
 
         GameSession targetGame = session.getGames().stream()
                 .filter(g -> g.getId().equals(gid))
@@ -561,6 +600,7 @@ public class SessionController {
     // --- REMOVE SNACK / ACCESSORY ---
     @DeleteMapping("/{sid}/games/{gid}/items/{itemId}")
     @Audited(action = AuditActions.SESSION_ITEM_REMOVED, entityType = AuditActions.ENTITY_SESSION, entityIdParam = "sid")
+    @Idempotent("SESSION_REMOVE_ITEM")
     @Transactional
     public ResponseEntity<?> removeItem(@PathVariable String sid, @PathVariable String gid, @PathVariable String itemId, Authentication auth) {
         CustomerSession session = sessionRepository.findById(sid).orElse(null);
@@ -570,6 +610,7 @@ public class SessionController {
             return ResponseEntity.notFound().build();
         }
         logger.info("Remove item {} requested from session {} game {}", itemId, sid, gid);
+        requireActive(session, "changed");
 
         for (GameSession g : session.getGames()) {
             if (g.getId().equals(gid)) {
@@ -628,6 +669,8 @@ public class SessionController {
                             .detail("total", itemToRemove.getTotal()).detail("resource", g.getResourceName()));
                 } else {
                     logger.warn("Remove item: item {} not found in session {} game {}", itemId, sid, gid);
+                    throw new org.springframework.web.server.ResponseStatusException(
+                            org.springframework.http.HttpStatus.NOT_FOUND, "Item not found (it may already have been removed)");
                 }
                 break;
             }

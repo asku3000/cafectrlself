@@ -356,6 +356,12 @@ public class MembershipCardService {
             default -> throw bad("Direction must be CREDIT or DEBIT");
         }
 
+        String key = idemKey("ADJUST", admin.getCafeId(), req.getRequestId());
+        Optional<MembershipCard> already = findByIdempotency(key);
+        if (already.isPresent()) {
+            logger.info("Adjustment request {} already processed -> card {}", req.getRequestId(), cardId);
+            return already.get();
+        }
         MembershipCard card = lock(admin.getCafeId(), cardId);
         expireIfDue(card, admin);
         if (card.getStatus() == Status.CLOSED) throw bad("This card is closed");
@@ -366,7 +372,10 @@ public class MembershipCardService {
 
         long sign = debit ? -1 : 1;
         Map<String, Object> before = cardSnapshot(card);
-        post(card, Type.ADJUSTMENT, sign * paid, sign * bonus, admin, e -> e.setNote(reason));
+        post(card, Type.ADJUSTMENT, sign * paid, sign * bonus, admin, e -> {
+            e.setNote(reason);
+            e.setIdempotencyKey(key);
+        });
         auditCard(AuditActions.CARD_ADJUSTED, admin, card,
                 (debit ? "Debited " : "Credited ") + AuditFormat.paise(paid + bonus) + (debit ? " from" : " to")
                         + " card " + card.getCardNumber() + " (" + card.getCustomerName() + ")"
