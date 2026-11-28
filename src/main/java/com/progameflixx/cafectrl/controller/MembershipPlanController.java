@@ -5,7 +5,9 @@ import com.progameflixx.cafectrl.dto.MembershipSettingsRequest;
 import com.progameflixx.cafectrl.entity.MembershipPlan;
 import com.progameflixx.cafectrl.entity.MembershipSettings;
 import com.progameflixx.cafectrl.entity.User;
-import com.progameflixx.cafectrl.service.AuditService;
+import com.progameflixx.cafectrl.audit.AuditActions;
+import com.progameflixx.cafectrl.audit.AuditService;
+import com.progameflixx.cafectrl.audit.Audited;
 import com.progameflixx.cafectrl.service.CurrentUserService;
 import com.progameflixx.cafectrl.service.MembershipPlanService;
 import com.progameflixx.cafectrl.service.MembershipReportService;
@@ -45,32 +47,31 @@ public class MembershipPlanController {
         return planService.list(currentUser.require(auth).getCafeId());
     }
 
+    @Audited(action = AuditActions.MEMBERSHIP_PLAN_CREATED, entityType = AuditActions.ENTITY_MEMBERSHIP_PLAN)
     @PostMapping("/plans")
     @PreAuthorize("hasRole('CAFE_ADMIN')")
     public MembershipPlan createPlan(@RequestBody MembershipPlanRequest req, Authentication auth) {
         User actor = currentUser.require(auth);
         MembershipPlan plan = planService.create(actor, req);
-        auditService.log(auth, "MEMBERSHIP_PLAN_CREATE", plan.getId(), planMeta(plan));
         return plan;
     }
 
+    @Audited(action = AuditActions.MEMBERSHIP_PLAN_UPDATED, entityType = AuditActions.ENTITY_MEMBERSHIP_PLAN, entityIdParam = "id")
     @PutMapping("/plans/{id}")
     @PreAuthorize("hasRole('CAFE_ADMIN')")
     public MembershipPlan updatePlan(@PathVariable String id, @RequestBody MembershipPlanRequest req, Authentication auth) {
         User actor = currentUser.require(auth);
         MembershipPlan plan = planService.update(actor, id, req);
-        auditService.log(auth, "MEMBERSHIP_PLAN_UPDATE", plan.getId(), planMeta(plan));
         return plan;
     }
 
+    @Audited(action = "MEMBERSHIP_PLAN_STATUS_CHANGE", entityType = AuditActions.ENTITY_MEMBERSHIP_PLAN, entityIdParam = "id")
     @PatchMapping("/plans/{id}/active")
     @PreAuthorize("hasRole('CAFE_ADMIN')")
     public MembershipPlan setPlanActive(@PathVariable String id, @RequestBody Map<String, Boolean> body, Authentication auth) {
         User actor = currentUser.require(auth);
         boolean active = Boolean.TRUE.equals(body.get("active"));
         MembershipPlan plan = planService.setActive(actor, id, active);
-        auditService.log(auth, active ? "MEMBERSHIP_PLAN_ACTIVATE" : "MEMBERSHIP_PLAN_DEACTIVATE", plan.getId(),
-                Map.of("name", plan.getName()));
         return plan;
     }
 
@@ -79,15 +80,12 @@ public class MembershipPlanController {
         return planService.getSettings(currentUser.require(auth).getCafeId());
     }
 
+    @Audited(action = AuditActions.MEMBERSHIP_SETTINGS_UPDATED, entityType = AuditActions.ENTITY_MEMBERSHIP_SETTINGS)
     @PutMapping("/settings")
     @PreAuthorize("hasRole('CAFE_ADMIN')")
     public MembershipSettings updateSettings(@RequestBody MembershipSettingsRequest req, Authentication auth) {
         User actor = currentUser.require(auth);
         MembershipSettings s = planService.updateSettings(actor, req);
-        auditService.log(auth, "MEMBERSHIP_SETTINGS_UPDATE", s.getCafeId(), Map.of(
-                "deduction_order", s.getDeductionOrder().name(),
-                "low_balance_threshold_paise", s.getLowBalanceThresholdPaise(),
-                "card_number_prefix", s.getCardNumberPrefix()));
         return s;
     }
 
@@ -102,14 +100,4 @@ public class MembershipPlanController {
         return reportService.report(user.getCafeId(), from, to);
     }
 
-    private static Map<String, Object> planMeta(MembershipPlan p) {
-        Map<String, Object> m = new HashMap<>();
-        m.put("name", p.getName());
-        m.put("load_amount_paise", p.getLoadAmountPaise());
-        m.put("bonus_type", p.getBonusType().name());
-        m.put("bonus_value", p.getBonusValue());
-        m.put("validity_days", p.getValidityDays());
-        m.put("is_active", p.getIsActive());
-        return m;
-    }
 }

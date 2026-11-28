@@ -1,5 +1,8 @@
 package com.progameflixx.cafectrl.exception;
 
+import com.progameflixx.cafectrl.audit.AuditActions;
+import com.progameflixx.cafectrl.audit.AuditRecord;
+import com.progameflixx.cafectrl.audit.AuditService;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -18,6 +21,12 @@ public class GlobalExceptionHandler {
 
     private static final Logger logger = LoggerFactory.getLogger(GlobalExceptionHandler.class);
 
+    private final AuditService audit;
+
+    public GlobalExceptionHandler(AuditService audit) {
+        this.audit = audit;
+    }
+
     // This catches the Java equivalent of FastAPI's HTTPException
     @ExceptionHandler(ResponseStatusException.class)
     public ResponseEntity<Map<String, String>> handleHttpException(ResponseStatusException ex, HttpServletRequest request) {
@@ -31,6 +40,9 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(AccessDeniedException.class)
     public ResponseEntity<Map<String, String>> handleAccessDenied(AccessDeniedException ex, HttpServletRequest request) {
         logger.warn("Access denied on {} {}: {}", request.getMethod(), request.getRequestURI(), ex.getMessage());
+        audit.recordFailure(AuditRecord.of(AuditActions.ACCESS_DENIED)
+                .description("Tried " + request.getMethod() + " " + request.getRequestURI() + " without permission")
+                .detail("method", request.getMethod()).detail("path", request.getRequestURI()), "Access denied");
         Map<String, String> body = new HashMap<>();
         body.put("detail", "Access denied");
         return ResponseEntity.status(HttpStatus.FORBIDDEN).body(body);
@@ -39,6 +51,14 @@ public class GlobalExceptionHandler {
     // Catch-all for unexpected server errors
     @ExceptionHandler(Exception.class)
     public ResponseEntity<Map<String, String>> handleGeneralException(Exception ex, HttpServletRequest request) {
+        // Spring's own client errors (unknown URL -> 404, wrong HTTP method -> 405, bad body -> 400, ...) carry
+        // their status; keep it instead of reporting a 500
+        if (ex instanceof org.springframework.web.ErrorResponse er && er.getStatusCode().is4xxClientError()) {
+            logger.warn("{} {} -> {} ({})", request.getMethod(), request.getRequestURI(), er.getStatusCode(), ex.getMessage());
+            Map<String, String> body = new HashMap<>();
+            body.put("detail", er.getBody().getDetail() != null ? er.getBody().getDetail() : er.getStatusCode().toString());
+            return ResponseEntity.status(er.getStatusCode()).body(body);
+        }
         logger.error("Unhandled exception on {} {}: {}", request.getMethod(), request.getRequestURI(), ex.toString(), ex);
         Map<String, String> body = new HashMap<>();
         body.put("detail", "An unexpected error occurred: " + ex.getMessage());

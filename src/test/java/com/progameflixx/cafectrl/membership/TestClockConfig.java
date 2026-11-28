@@ -24,6 +24,10 @@ public class TestClockConfig {
             instant = date.atTime(12, 0).atZone(ZONE).toInstant();
         }
 
+        public void setInstant(Instant at) {
+            instant = at;
+        }
+
         public void plusDays(long days) {
             instant = instant.plus(Duration.ofDays(days));
         }

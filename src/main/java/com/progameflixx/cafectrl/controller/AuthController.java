@@ -1,5 +1,11 @@
 package com.progameflixx.cafectrl.controller;
 
+import com.progameflixx.cafectrl.audit.AuditActions;
+import com.progameflixx.cafectrl.audit.AuditDiff;
+import com.progameflixx.cafectrl.audit.AuditFormat;
+import com.progameflixx.cafectrl.audit.AuditRecord;
+import com.progameflixx.cafectrl.audit.AuditService;
+import com.progameflixx.cafectrl.audit.Audited;
 import com.progameflixx.cafectrl.config.JwtService;
 import com.progameflixx.cafectrl.dto.LoginRequest;
 import com.progameflixx.cafectrl.dto.SignupRequest;
@@ -47,6 +53,9 @@ public class AuthController {
     @Autowired
     private PasswordResetTokenRepository tokenRepository;
 
+    @Autowired
+    private AuditService audit;
+
     private static final Logger logger = LoggerFactory.getLogger(AuthController.class);
 
     // Translates: @api.post("/auth/signup")
@@ -58,6 +67,8 @@ public class AuthController {
 
         if (userRepository.findByEmail(email).isPresent()) {
             logger.warn("Signup rejected: email {} already registered", email);
+            audit.recordFailure(AuditRecord.of(AuditActions.SIGNUP).anonymous(email).detail("cafe_name", req.getCafeName()),
+                    "Email already registered");
             return ResponseEntity.badRequest().body("Email already registered");
         }
 
@@ -85,6 +96,9 @@ public class AuthController {
         LogContext.putUser(user.getEmail(), user.getRole());
         LogContext.putCafeId(cafe.getId());
         logger.info("Signup successful: user {} created as owner of cafe {} ('{}')", user.getId(), cafe.getId(), cafe.getName());
+        audit.record(AuditRecord.of(AuditActions.SIGNUP).actor(user).entity(AuditActions.ENTITY_CAFE, cafe.getId())
+                .description("Signed up cafe '" + cafe.getName() + "' with owner " + user.getName() + " (" + email + ")")
+                .detail("cafe_name", cafe.getName()).detail("owner_email", email));
 
         // 3. Generate JWT & Cookie
         String token = jwtService.generateToken(user.getId(), user.getEmail(), user.getRole());
@@ -113,6 +127,10 @@ public class AuthController {
 
         if (userOpt.isEmpty() || !passwordEncoder.matches(req.getPassword(), userOpt.get().getPassword())) {
             logger.warn("Login failed for {}: invalid credentials", loginEmail);
+            AuditRecord failed = AuditRecord.of(AuditActions.LOGIN_FAILED).entity(AuditActions.ENTITY_USER, userOpt.map(User::getId).orElse(null))
+                    .description("Failed login for " + loginEmail);
+            if (userOpt.isPresent()) failed.actor(userOpt.get()); else failed.anonymous(loginEmail);
+            audit.recordFailure(failed, userOpt.isPresent() ? "Wrong password" : "Unknown email");
             return ResponseEntity.status(401).body("Invalid email or password");
         }
 
@@ -121,9 +139,13 @@ public class AuthController {
         LogContext.putCafeId(user.getCafeId());
         if (!user.isActive()) {
             logger.warn("Login blocked for {}: account disabled", loginEmail);
+            audit.recordFailure(AuditRecord.of(AuditActions.LOGIN_FAILED).actor(user).entity(AuditActions.ENTITY_USER, user.getId())
+                    .description("Blocked login for " + loginEmail), "Account disabled");
             return ResponseEntity.status(403).body("Account disabled");
         }
         logger.info("Login successful for {} ({}) role={}", user.getEmail(), user.getName(), user.getRole());
+        audit.record(AuditRecord.of(AuditActions.LOGIN_SUCCEEDED).actor(user).entity(AuditActions.ENTITY_USER, user.getId())
+                .description(user.getName() + " logged in"));
 
         String token = jwtService.generateToken(user.getId(), user.getEmail(), user.getRole());
         ResponseCookie cookie = ResponseCookie.from("access_token", token)
@@ -134,6 +156,25 @@ public class AuthController {
         response.put("access_token", token);
 
         return ResponseEntity.ok().header(HttpHeaders.SET_COOKIE, cookie.toString()).body(response);
+    }
+
+    /**
+     * Clears the login cookie and records the logout. Login tokens are stateless JWTs, so the token itself stays
+     * valid until it expires; the UI also drops its copy.
+     */
+    @PostMapping("/logout")
+    public ResponseEntity<?> logout(Authentication auth) {
+        ResponseCookie cleared = ResponseCookie.from("access_token", "")
+                .httpOnly(true).secure(true).path("/").maxAge(0).build();
+        if (auth != null && auth.isAuthenticated() && auth.getName() != null) {
+            userRepository.findByEmail(auth.getName()).ifPresent(u -> {
+                LogContext.putCafeId(u.getCafeId());
+                logger.info("Logout for {}", u.getEmail());
+                audit.record(AuditRecord.of(AuditActions.LOGOUT).actor(u).entity(AuditActions.ENTITY_USER, u.getId())
+                        .description(u.getName() + " logged out"));
+            });
+        }
+        return ResponseEntity.ok().header(HttpHeaders.SET_COOKIE, cleared.toString()).body(Map.of("ok", true));
     }
 
     @GetMapping("/me")
@@ -185,6 +226,8 @@ public class AuthController {
         if (user == null || !"CAFE_ADMIN".equalsIgnoreCase(user.getRole())) {
             // Return a vague message so malicious users can't guess valid admin emails
             logger.warn("Password reset ignored for {}: no CAFE_ADMIN account", email);
+            audit.recordFailure(AuditRecord.of(AuditActions.PASSWORD_RESET_REQUESTED).anonymous(String.valueOf(email))
+                    .description("Password reset requested for " + email), "No admin account with that email");
             return ResponseEntity.ok(Map.of("message", "If the email matches an Admin account, a verification token has been generated."));
         }
 
@@ -220,6 +263,8 @@ public class AuthController {
         // 2. Build the link dynamically using the client's origin
         String resetLink = origin + "/reset-password?token=" + token;
         logger.info("Password reset token generated for admin {} (valid 15 min)", email);
+        audit.record(AuditRecord.of(AuditActions.PASSWORD_RESET_REQUESTED).actor(user).entity(AuditActions.ENTITY_USER, user.getId())
+                .description("Password reset link generated for " + email + " (valid 15 minutes)"));
         // The link contains a live reset token, so it is only written at DEBUG level
         logger.debug("Password reset link for {}: {}", email, resetLink);
         Map<String, Object> response = new HashMap<>();
@@ -239,6 +284,9 @@ public class AuthController {
         PasswordResetToken resetToken = tokenRepository.findByToken(token).orElse(null);
         if (resetToken == null || resetToken.isExpired()) {
             logger.warn("Password reset failed: token {}", resetToken == null ? "not found" : "expired for " + resetToken.getEmail());
+            audit.recordFailure(AuditRecord.of(AuditActions.PASSWORD_RESET_COMPLETED)
+                    .anonymous(resetToken == null ? "unknown" : resetToken.getEmail()),
+                    resetToken == null ? "Invalid reset link" : "Expired reset link");
             return ResponseEntity.badRequest().body(Map.of("message", "The verification token is invalid or has expired."));
         }
 
@@ -256,12 +304,15 @@ public class AuthController {
         // Immediately burn the token row so it can never be used twice
         tokenRepository.delete(resetToken);
         logger.info("Password reset completed for {}", user.getEmail());
+        audit.record(AuditRecord.of(AuditActions.PASSWORD_RESET_COMPLETED).actor(user).entity(AuditActions.ENTITY_USER, user.getId())
+                .description(user.getName() + " reset their password with an emailed link"));
 
         return ResponseEntity.ok(Map.of("message", "Password updated successfully! You can now log in."));
     }
 
     @PostMapping("/change-password")
     @PreAuthorize("hasRole('CAFE_ADMIN')")
+    @Audited(action = AuditActions.PASSWORD_CHANGED, entityType = AuditActions.ENTITY_USER)
     public ResponseEntity<?> changePassword(@RequestBody Map<String, String> req, Authentication auth) {
         String principalIdentifier = auth.getName();
         String oldPassword = req.get("current_password");
@@ -292,6 +343,8 @@ public class AuthController {
         user.setPassword(passwordEncoder.encode(newPassword));
         userRepository.save(user);
         logger.info("Password changed for {}", user.getEmail());
+        audit.record(AuditRecord.of(AuditActions.PASSWORD_CHANGED).actor(user).entity(AuditActions.ENTITY_USER, user.getId())
+                .description(user.getName() + " changed their password"));
 
         return ResponseEntity.ok(Map.of("message", "Password changed successfully"));
     }

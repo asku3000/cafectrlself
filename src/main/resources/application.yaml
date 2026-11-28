@@ -68,3 +68,13 @@ app:
 
 frontend:
   url: ${FRONTEND_URL:http://localhost:3000}
+
+# Audit log retention. The purge job deletes ONLY audit_events rows older than retention-days (whole IST days).
+audit:
+  retention-days: ${AUDIT_RETENTION_DAYS:5}
+  purge:
+    enabled: ${AUDIT_PURGE_ENABLED:true}
+    # Spring cron (sec min hour day month weekday), evaluated in Asia/Kolkata. Default: daily 03:00 IST.
+    cron: ${AUDIT_PURGE_CRON:0 0 3 * * *}
+    batch-size: 1000
+    batch-pause-ms: 200

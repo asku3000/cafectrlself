@@ -1,5 +1,10 @@
 package com.progameflixx.cafectrl.service;
 
+import com.progameflixx.cafectrl.audit.AuditActions;
+import com.progameflixx.cafectrl.audit.AuditDiff;
+import com.progameflixx.cafectrl.audit.AuditFormat;
+import com.progameflixx.cafectrl.audit.AuditRecord;
+import com.progameflixx.cafectrl.audit.AuditService;
 import com.progameflixx.cafectrl.dto.MembershipPlanRequest;
 import com.progameflixx.cafectrl.dto.MembershipSettingsRequest;
 import com.progameflixx.cafectrl.entity.MembershipMath;
@@ -17,6 +22,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
 import java.util.Locale;
 import java.util.regex.Pattern;
 
@@ -32,10 +38,13 @@ public class MembershipPlanService {
 
     private final MembershipPlanRepository planRepository;
     private final MembershipSettingsRepository settingsRepository;
+    private final AuditService audit;
 
-    public MembershipPlanService(MembershipPlanRepository planRepository, MembershipSettingsRepository settingsRepository) {
+    public MembershipPlanService(MembershipPlanRepository planRepository, MembershipSettingsRepository settingsRepository,
+                                 AuditService audit) {
         this.planRepository = planRepository;
         this.settingsRepository = settingsRepository;
+        this.audit = audit;
     }
 
     // ---------------- Plans ----------------
@@ -61,6 +70,11 @@ public class MembershipPlanService {
         logger.info("Membership plan {} created: '{}' load={} bonus={} {} validity={}d",
                 saved.getId(), saved.getName(), saved.getLoadAmountPaise(), saved.getBonusType(),
                 saved.getBonusValue(), saved.getValidityDays());
+        audit.record(AuditRecord.of(AuditActions.MEMBERSHIP_PLAN_CREATED).actor(actor)
+                .entity(AuditActions.ENTITY_MEMBERSHIP_PLAN, saved.getId())
+                .description("Created membership plan '" + saved.getName() + "': pay " + AuditFormat.paise(saved.getLoadAmountPaise())
+                        + ", gets " + AuditFormat.paise(saved.getTotalValuePaise()) + ", " + saved.getValidityDays() + " days")
+                .diff(null, planSnapshot(saved)));
         return saved;
     }
 
@@ -68,22 +82,34 @@ public class MembershipPlanService {
     @Transactional
     public MembershipPlan update(User actor, String planId, MembershipPlanRequest req) {
         MembershipPlan plan = get(actor.getCafeId(), planId);
+        Map<String, Object> before = planSnapshot(plan);
         apply(plan, req, false);
         plan.setUpdatedByName(actor.getName());
         MembershipPlan saved = planRepository.save(plan);
         logger.info("Membership plan {} updated: '{}' load={} bonus={} {} validity={}d active={}",
                 saved.getId(), saved.getName(), saved.getLoadAmountPaise(), saved.getBonusType(),
                 saved.getBonusValue(), saved.getValidityDays(), saved.getIsActive());
+        audit.record(AuditRecord.of(AuditActions.MEMBERSHIP_PLAN_UPDATED).actor(actor)
+                .entity(AuditActions.ENTITY_MEMBERSHIP_PLAN, saved.getId())
+                .description("Edited membership plan '" + saved.getName() + "' (cards already sold keep their terms)")
+                .diff(before, planSnapshot(saved)));
         return saved;
     }
 
     @Transactional
     public MembershipPlan setActive(User actor, String planId, boolean active) {
         MembershipPlan plan = get(actor.getCafeId(), planId);
+        boolean was = Boolean.TRUE.equals(plan.getIsActive());
         plan.setIsActive(active);
         plan.setUpdatedByName(actor.getName());
         logger.info("Membership plan {} ('{}') {}", planId, plan.getName(), active ? "activated" : "deactivated");
-        return planRepository.save(plan);
+        MembershipPlan saved = planRepository.save(plan);
+        audit.record(AuditRecord.of(active ? AuditActions.MEMBERSHIP_PLAN_ACTIVATED : AuditActions.MEMBERSHIP_PLAN_DEACTIVATED)
+                .actor(actor).entity(AuditActions.ENTITY_MEMBERSHIP_PLAN, saved.getId())
+                .description((active ? "Put membership plan '" : "Took membership plan '") + saved.getName()
+                        + (active ? "' on sale" : "' off sale (existing cards keep working)"))
+                .diff(AuditDiff.snapshot("is_active", was), AuditDiff.snapshot("is_active", active)));
+        return saved;
     }
 
     /**
@@ -179,6 +205,7 @@ public class MembershipPlanService {
     public MembershipSettings updateSettings(User actor, MembershipSettingsRequest req) {
         if (req == null) throw bad("Request body is required");
         MembershipSettings s = getSettings(actor.getCafeId());
+        Map<String, Object> before = settingsSnapshot(s);
 
         if (req.getDeductionOrder() != null) {
             try {
@@ -201,7 +228,24 @@ public class MembershipPlanService {
         MembershipSettings saved = settingsRepository.save(s);
         logger.info("Membership settings updated: deductionOrder={} lowBalance={} prefix={}",
                 saved.getDeductionOrder(), saved.getLowBalanceThresholdPaise(), saved.getCardNumberPrefix());
+        audit.record(AuditRecord.of(AuditActions.MEMBERSHIP_SETTINGS_UPDATED).actor(actor)
+                .entity(AuditActions.ENTITY_MEMBERSHIP_SETTINGS, saved.getCafeId())
+                .description("Changed membership settings")
+                .diff(before, settingsSnapshot(saved)));
         return saved;
+    }
+
+    static Map<String, Object> planSnapshot(MembershipPlan p) {
+        return AuditDiff.snapshot("name", p.getName(), "load_amount_paise", p.getLoadAmountPaise(),
+                "bonus_type", p.getBonusType() == null ? null : p.getBonusType().name(), "bonus_value", p.getBonusValue(),
+                "validity_days", p.getValidityDays(), "is_active", p.getIsActive(), "color", p.getColor(),
+                "badge", p.getBadge(), "sort_order", p.getSortOrder(), "description", p.getDescription());
+    }
+
+    static Map<String, Object> settingsSnapshot(MembershipSettings s) {
+        return AuditDiff.snapshot("deduction_order", s.getDeductionOrder().name(),
+                "low_balance_threshold_paise", s.getLowBalanceThresholdPaise(),
+                "card_number_prefix", s.getCardNumberPrefix());
     }
 
     private static ResponseStatusException bad(String message) {

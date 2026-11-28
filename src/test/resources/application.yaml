@@ -39,3 +39,10 @@ logging:
 membership:
   expiry-job:
     enabled: false
+
+audit:
+  retention-days: 5
+  purge:
+    enabled: false
+    batch-size: 1000
+    batch-pause-ms: 0

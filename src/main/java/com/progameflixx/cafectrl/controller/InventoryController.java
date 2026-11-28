@@ -1,5 +1,11 @@
 package com.progameflixx.cafectrl.controller;
 
+import com.progameflixx.cafectrl.audit.AuditActions;
+import com.progameflixx.cafectrl.audit.AuditDiff;
+import com.progameflixx.cafectrl.audit.AuditFormat;
+import com.progameflixx.cafectrl.audit.AuditRecord;
+import com.progameflixx.cafectrl.audit.AuditService;
+import com.progameflixx.cafectrl.audit.Audited;
 import com.progameflixx.cafectrl.logging.LogContext;
 
 import com.progameflixx.cafectrl.dto.InventoryRequestDTO;
@@ -31,6 +37,9 @@ public class InventoryController {
 
     @Autowired
     private UserRepository userRepository;
+
+    @Autowired
+    private AuditService audit;
 
     private String getCafeId(Authentication auth) {
         String cafeId = userRepository.findByEmail(auth.getName())
@@ -85,6 +94,7 @@ public class InventoryController {
     }
 
     @PostMapping
+    @Audited(action = AuditActions.INVENTORY_ITEM_CREATED, entityType = AuditActions.ENTITY_INVENTORY)
     public InventoryItem createInventory(@RequestBody InventoryRequestDTO request, Authentication auth) {
         try {
             logger.info("Create inventory item requested: {}", request);
@@ -126,15 +136,22 @@ public class InventoryController {
             logger.info("Inventory item created: id={} name='{}' category={} price={} trackable={} stock={} ingredients={}",
                     newItem.getId(), newItem.getName(), newItem.getCategory(), newItem.getPrice(), newItem.getIsTrackable(),
                     newItem.getStock(), newItem.getIngredients() != null ? newItem.getIngredients().size() : 0);
+            audit.record(AuditRecord.of(AuditActions.INVENTORY_ITEM_CREATED).entity(AuditActions.ENTITY_INVENTORY, newItem.getId())
+                    .description("Added inventory item '" + newItem.getName() + "' at " + AuditFormat.rupees(newItem.getPrice())
+                            + (Boolean.TRUE.equals(newItem.getIsTrackable()) ? ", stock " + newItem.getStock() : ""))
+                    .diff(null, itemSnapshot(newItem)));
 
             return newItem;
         } catch (Exception e) {
             logger.error("Failed to create inventory item '{}': {}", request.getName(), e.getMessage(), e);
+            audit.recordFailure(AuditRecord.of(AuditActions.INVENTORY_ITEM_CREATED).entity(AuditActions.ENTITY_INVENTORY, null)
+                    .detail("name", request.getName()), e.getMessage());
             return null;
         }
     }
 
     @PutMapping("/{iid}")
+    @Audited(action = AuditActions.INVENTORY_ITEM_UPDATED, entityType = AuditActions.ENTITY_INVENTORY, entityIdParam = "iid")
     public ResponseEntity<?> updateInventory(@PathVariable String iid, @RequestBody InventoryItem updates, Authentication auth) {
         InventoryItem existing = inventoryRepository.findById(iid).orElse(null);
         if (existing == null || !existing.getCafeId().equals(getCafeId(auth))) {
@@ -144,6 +161,7 @@ public class InventoryController {
         logger.info("Update inventory item {} ('{}'): before price={} stock={} category={} trackable={}",
                 iid, existing.getName(), existing.getPrice(), existing.getStock(), existing.getCategory(), existing.getIsTrackable());
 
+        Map<String, Object> before = itemSnapshot(existing);
         // 1. Map the basic fields
         if (updates.getName() != null) existing.setName(updates.getName());
         if (updates.getCategory() != null) existing.setCategory(updates.getCategory());
@@ -181,18 +199,33 @@ public class InventoryController {
         logger.info("Inventory item {} updated: name='{}' price={} stock={} category={} trackable={} ingredients={}",
                 iid, saved.getName(), saved.getPrice(), saved.getStock(), saved.getCategory(), saved.getIsTrackable(),
                 saved.getIngredients() != null ? saved.getIngredients().size() : 0);
+        audit.record(AuditRecord.of(AuditActions.INVENTORY_ITEM_UPDATED).entity(AuditActions.ENTITY_INVENTORY, iid)
+                .description("Edited inventory item '" + saved.getName() + "'")
+                .diff(before, itemSnapshot(saved)));
         return ResponseEntity.ok(saved);
     }
 
     @DeleteMapping("/{iid}")
+    @Audited(action = AuditActions.INVENTORY_ITEM_DELETED, entityType = AuditActions.ENTITY_INVENTORY, entityIdParam = "iid")
     public ResponseEntity<?> deleteInventory(@PathVariable String iid, Authentication auth) {
         InventoryItem existing = inventoryRepository.findById(iid).orElse(null);
         if (existing == null || !existing.getCafeId().equals(getCafeId(auth))) {
             logger.warn("Delete inventory: item {} not found in this cafe", iid);
             return ResponseEntity.notFound().build();
         }
+        Map<String, Object> before = itemSnapshot(existing);
         inventoryRepository.delete(existing);
         logger.info("Inventory item deleted: id={} name='{}'", iid, existing.getName());
+        audit.record(AuditRecord.of(AuditActions.INVENTORY_ITEM_DELETED).entity(AuditActions.ENTITY_INVENTORY, iid)
+                .description("Deleted inventory item '" + existing.getName() + "'").diff(before, null));
         return ResponseEntity.ok(Map.of("ok", true));
+    }
+
+    private static Map<String, Object> itemSnapshot(InventoryItem i) {
+        List<String> recipe = i.getIngredients() == null ? List.of() : i.getIngredients().stream()
+                .map(r -> (r.getRawMaterial() != null ? r.getRawMaterial().getName() : "?") + " x" + r.getQuantityRequired())
+                .toList();
+        return AuditDiff.snapshot("name", i.getName(), "category", i.getCategory(), "price", i.getPrice(),
+                "stock", i.getStock(), "is_trackable", i.getIsTrackable(), "recipe", recipe);
     }
 }

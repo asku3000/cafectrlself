@@ -1,6 +1,12 @@
 package com.progameflixx.cafectrl.service;
 
+import com.progameflixx.cafectrl.audit.AuditActions;
+import com.progameflixx.cafectrl.audit.AuditDiff;
+import com.progameflixx.cafectrl.audit.AuditFormat;
+import com.progameflixx.cafectrl.audit.AuditRecord;
+import com.progameflixx.cafectrl.audit.AuditService;
 import com.progameflixx.cafectrl.dto.CheckoutRequest;
+import com.progameflixx.cafectrl.repository.AuditEventRepository;
 import com.progameflixx.cafectrl.entity.*;
 import com.progameflixx.cafectrl.repository.CustomerSessionRepository;
 import com.progameflixx.cafectrl.repository.MembershipCardRepository;
@@ -33,15 +39,19 @@ public class SessionBillingService {
     private final MembershipCardRepository cardRepository;
     private final BillingService billingService;
     private final MembershipCardService cardService;
+    private final AuditService audit;
+    private final AuditEventRepository auditEvents;
 
     public SessionBillingService(CustomerSessionRepository sessionRepository, PendingPaymentRepository pendingPaymentRepository,
                                  MembershipCardRepository cardRepository, BillingService billingService,
-                                 MembershipCardService cardService) {
+                                 MembershipCardService cardService, AuditService audit, AuditEventRepository auditEvents) {
         this.sessionRepository = sessionRepository;
         this.pendingPaymentRepository = pendingPaymentRepository;
         this.cardRepository = cardRepository;
         this.billingService = billingService;
         this.cardService = cardService;
+        this.audit = audit;
+        this.auditEvents = auditEvents;
     }
 
     /** Result of a checkout: the saved session plus the computed bill (for audit). */
@@ -129,7 +139,119 @@ public class SessionBillingService {
                         debt.getId(), session.getId(), session.getCustomerName(), debt.getAmount());
             }
         }
+        auditCheckout(actor, saved, bill, payments, billSeq);
         return new CheckoutResult(saved, grandTotal, cardPayment);
+    }
+
+    // =====================================================================
+    // Audit (same transaction as the bill: a bill can never exist without its audit trail)
+    // =====================================================================
+
+    private void auditCheckout(User actor, CustomerSession s, Map<String, Object> bill, List<PaymentSplit> payments, int billSeq) {
+        String billNo = AuditFormat.billNo(s.getId());
+        String where = resourcesOf(s);
+        double adjustment = s.getAdjustment() == null ? 0.0 : s.getAdjustment();
+        Map<String, Object> now = billSnapshot(s.getBillTotal(), adjustment, payments);
+
+        AuditRecord created = AuditRecord.of(billSeq > 1 ? AuditActions.BILL_EDITED : AuditActions.BILL_CREATED)
+                .actor(actor).entity(AuditActions.ENTITY_SESSION, s.getId())
+                .description((billSeq > 1 ? "Re-closed " : "Closed ") + "Bill " + billNo + " for " + s.getCustomerName()
+                        + where + ": total " + AuditFormat.rupees(s.getBillTotal()))
+                .detail("bill_seq", billSeq)
+                .detail("subtotal", bill.get("subtotal"))
+                .detail("adjustment", adjustment)
+                .detail("total", s.getBillTotal())
+                .detail("billed_at", s.getBilledAt())
+                .detail("notes", s.getNotes());
+        if (billSeq > 1) {
+            // what the bill looked like before it was reopened (recorded by BILL_REOPENED)
+            previousBill(s.getId()).ifPresent(prev -> created.diff(prev, now));
+        }
+        audit.recordInTransaction(created);
+
+        if (adjustment != 0.0) {
+            boolean discount = adjustment < 0;
+            audit.recordInTransaction(AuditRecord.of(discount ? AuditActions.BILL_DISCOUNT_APPLIED : AuditActions.BILL_ADJUSTED)
+                    .actor(actor).entity(AuditActions.ENTITY_SESSION, s.getId())
+                    .description((discount ? "Applied " + AuditFormat.rupees(-adjustment) + " discount on Bill "
+                            : "Added " + AuditFormat.rupees(adjustment) + " manual adjustment on Bill ") + billNo + where)
+                    .detail("adjustment", adjustment)
+                    .detail("subtotal", bill.get("subtotal"))
+                    .detail("total", s.getBillTotal()));
+        }
+
+        if (!payments.isEmpty()) {
+            audit.recordInTransaction(AuditRecord.of(AuditActions.PAYMENT_RECORDED)
+                    .actor(actor).entity(AuditActions.ENTITY_SESSION, s.getId())
+                    .description("Payment for Bill " + billNo + ": " + describePayments(payments))
+                    .detail("payments", paymentList(payments))
+                    .detail("total", s.getBillTotal()));
+        }
+    }
+
+    private void auditUndo(String action, User admin, CustomerSession s, String reason, Map<String, Object> previous,
+                           String newStatus, UndoResult undo) {
+        String billNo = AuditFormat.billNo(s.getId());
+        String verb = AuditActions.BILL_VOIDED.equals(action) ? "Voided" : "Reopened";
+        StringBuilder desc = new StringBuilder(verb + " Bill " + billNo + " for " + s.getCustomerName() + resourcesOf(s)
+                + " (was " + AuditFormat.rupees((Double) previous.get("total")) + ")");
+        long credited = undo.reversals().stream().mapToLong(MembershipCardService.Reversal::creditedPaise).sum();
+        if (credited > 0) desc.append("; ").append(AuditFormat.paise(credited)).append(" returned to card");
+        if (undo.voidedDebts() > 0) desc.append("; ").append(undo.voidedDebts()).append(" pending amount(s) voided");
+        audit.recordInTransaction(AuditRecord.of(action)
+                .actor(admin).entity(AuditActions.ENTITY_SESSION, s.getId())
+                .description(desc.toString())
+                .reason(reason)
+                .diff(AuditDiff.snapshot("status", "billed"), AuditDiff.snapshot("status", newStatus))
+                .detail("previous", previous)
+                .detail("voided_pending_debts", undo.voidedDebts())
+                .detail("card_reversals", undo.reversals().stream().map(r -> Map.of(
+                        "card_number", r.cardNumber(), "credited_paise", r.creditedPaise(),
+                        "re_forfeited_paise", r.reForfeitedPaise())).toList()));
+    }
+
+    /** The bill before its last reopen, from the BILL_REOPENED audit entry (null-safe). */
+    @SuppressWarnings("unchecked")
+    private java.util.Optional<Map<String, Object>> previousBill(String sessionId) {
+        return auditEvents.findByEntityTypeAndEntityIdOrderByIdDesc(AuditActions.ENTITY_SESSION, sessionId).stream()
+                .filter(e -> AuditActions.BILL_REOPENED.equals(e.getAction()) && e.getDetails() != null)
+                .findFirst()
+                .map(e -> e.getDetails().get("previous"))
+                .filter(p -> p instanceof Map)
+                .map(p -> (Map<String, Object>) p);
+    }
+
+    private static Map<String, Object> billSnapshot(Double total, double adjustment, List<PaymentSplit> payments) {
+        return AuditDiff.snapshot("total", total, "adjustment", adjustment, "payments", paymentList(payments));
+    }
+
+    static List<Map<String, Object>> paymentList(List<PaymentSplit> payments) {
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (PaymentSplit p : payments) {
+            Map<String, Object> m = new java.util.LinkedHashMap<>();
+            m.put("mode", p.getMode());
+            m.put("amount", p.getAmount());
+            if (p.getCardNumber() != null) m.put("card_number", p.getCardNumber());
+            out.add(m);
+        }
+        return out;
+    }
+
+    static String describePayments(List<PaymentSplit> payments) {
+        List<String> parts = new ArrayList<>();
+        for (PaymentSplit p : payments) {
+            String mode = MEMBERSHIP_MODE.equalsIgnoreCase(p.getMode())
+                    ? "CARD " + (p.getCardNumber() != null ? p.getCardNumber() : "")
+                    : String.valueOf(p.getMode()).toUpperCase();
+            parts.add(mode.trim() + " " + AuditFormat.rupees(p.getAmount()));
+        }
+        return String.join(" + ", parts);
+    }
+
+    private static String resourcesOf(CustomerSession s) {
+        List<String> names = s.getGames().stream().map(GameSession::getResourceName)
+                .filter(java.util.Objects::nonNull).distinct().toList();
+        return names.isEmpty() ? "" : " (" + String.join(", ", names) + ")";
     }
 
     public record UndoResult(CustomerSession session, List<MembershipCardService.Reversal> reversals, int voidedDebts) {}
@@ -142,6 +264,8 @@ public class SessionBillingService {
     public UndoResult reopen(User admin, String sessionId, String reason) {
         String why = requireReason(reason);
         CustomerSession session = lockBilled(admin, sessionId);
+        Map<String, Object> previous = billSnapshot(session.getBillTotal(),
+                session.getAdjustment() == null ? 0.0 : session.getAdjustment(), session.getPayments());
         UndoResult undo = undoPayments(admin, session, "Bill reopened: " + why);
         session.setStatus("active");
         session.setBilledAt(null);
@@ -151,6 +275,7 @@ public class SessionBillingService {
         CustomerSession saved = sessionRepository.save(session);
         logger.info("Session {} reopened by {}: reason='{}' reversals={} voidedDebts={}",
                 sessionId, admin.getName(), why, undo.reversals().size(), undo.voidedDebts());
+        auditUndo(AuditActions.BILL_REOPENED, admin, saved, why, previous, "active", undo);
         return new UndoResult(saved, undo.reversals(), undo.voidedDebts());
     }
 
@@ -159,12 +284,15 @@ public class SessionBillingService {
     public UndoResult voidBill(User admin, String sessionId, String reason) {
         String why = requireReason(reason);
         CustomerSession session = lockBilled(admin, sessionId);
+        Map<String, Object> previous = billSnapshot(session.getBillTotal(),
+                session.getAdjustment() == null ? 0.0 : session.getAdjustment(), session.getPayments());
         UndoResult undo = undoPayments(admin, session, "Bill voided: " + why);
         session.setStatus("voided");
         session.setNotes(appendNote(session.getNotes(), "Voided by " + admin.getName() + ": " + why));
         CustomerSession saved = sessionRepository.save(session);
         logger.info("Session {} voided by {}: reason='{}' reversals={} voidedDebts={}",
                 sessionId, admin.getName(), why, undo.reversals().size(), undo.voidedDebts());
+        auditUndo(AuditActions.BILL_VOIDED, admin, saved, why, previous, "voided", undo);
         return new UndoResult(saved, undo.reversals(), undo.voidedDebts());
     }
 

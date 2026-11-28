@@ -1,5 +1,11 @@
 package com.progameflixx.cafectrl.controller;
 
+import com.progameflixx.cafectrl.audit.AuditActions;
+import com.progameflixx.cafectrl.audit.AuditDiff;
+import com.progameflixx.cafectrl.audit.AuditFormat;
+import com.progameflixx.cafectrl.audit.AuditRecord;
+import com.progameflixx.cafectrl.audit.AuditService;
+import com.progameflixx.cafectrl.audit.Audited;
 import com.progameflixx.cafectrl.logging.LogContext;
 
 import com.progameflixx.cafectrl.dto.DebtClearRequest;
@@ -33,6 +39,9 @@ public class PendingPaymentController {
     @Autowired
     private UserRepository userRepository;
 
+    @Autowired
+    private AuditService audit;
+
     @GetMapping
     @PreAuthorize("hasAnyRole('CAFE_ADMIN', 'OPERATOR')")
     public ResponseEntity<?> getActivePending(Authentication auth) {
@@ -43,6 +52,7 @@ public class PendingPaymentController {
     }
 
     @PostMapping("/{id}/clear")
+    @Audited(action = AuditActions.PENDING_PAYMENT_SETTLED, entityType = AuditActions.ENTITY_PENDING_PAYMENT, entityIdParam = "id")
     @PreAuthorize("hasAnyRole('CAFE_ADMIN', 'OPERATOR')")
     @Transactional // <-- CRITICAL: If the server crashes on row 2, the whole split rolls back instantly!
     public ResponseEntity<?> clearPayment(@PathVariable Long id, @RequestBody DebtClearRequest req, Authentication auth) {
@@ -97,6 +107,7 @@ public class PendingPaymentController {
         }
 
         LocalDateTime now = LocalDateTime.now();
+        double originalDebt = existingDebt.getAmount();
 
         // 3. Process the 1st paid split by overwriting the EXISTING row
         // (This keeps the primary key alive for your historic audit logs)
@@ -150,6 +161,20 @@ public class PendingPaymentController {
             logger.info("Carry-forward pending payment {} created from debt {}: amount={}", carryForward.getId(), id, carriedForwardDebt);
         }
 
+        double collected = paidSplits.stream().mapToDouble(PaymentSplit::getAmount).sum();
+        List<String> parts = paidSplits.stream()
+                .map(sp -> sp.getMode().toUpperCase() + " " + AuditFormat.rupees(sp.getAmount())).toList();
+        audit.recordInTransaction(AuditRecord.of(AuditActions.PENDING_PAYMENT_SETTLED)
+                .entity(AuditActions.ENTITY_PENDING_PAYMENT, String.valueOf(id))
+                .description("Collected " + AuditFormat.rupees(collected) + " of " + AuditFormat.rupees(originalDebt)
+                        + " pending from " + existingDebt.getCustomerName() + " (Bill " + AuditFormat.billNo(existingDebt.getSessionId())
+                        + "): " + String.join(" + ", parts)
+                        + (carriedForwardDebt > 0 ? "; " + AuditFormat.rupees(carriedForwardDebt) + " still pending" : ""))
+                .detail("session_id", existingDebt.getSessionId())
+                .detail("payments", paidSplits.stream().map(sp -> Map.of("mode", sp.getMode(), "amount", sp.getAmount())).toList())
+                .detail("original_amount", originalDebt)
+                .detail("carried_forward", carriedForwardDebt)
+                .detail("notes", req.getNotes()));
         return ResponseEntity.ok(Map.of("message", "Account successfully reconciled!"));
     }
 
