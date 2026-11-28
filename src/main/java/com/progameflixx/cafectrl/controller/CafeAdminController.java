@@ -1,5 +1,6 @@
 package com.progameflixx.cafectrl.controller;
 
+import com.progameflixx.cafectrl.idempotency.Idempotent;
 import com.progameflixx.cafectrl.audit.AuditActions;
 import com.progameflixx.cafectrl.audit.AuditDiff;
 import com.progameflixx.cafectrl.audit.AuditFormat;
@@ -79,6 +80,7 @@ public class CafeAdminController {
                 });
     }
 
+    @Idempotent("CAFE_UPDATE")
     @PutMapping("/cafe")
     @Audited(action = AuditActions.CAFE_UPDATED, entityType = AuditActions.ENTITY_CAFE)
     public ResponseEntity<?> updateCafe(@RequestBody Cafe updates, Authentication auth) {
@@ -115,6 +117,7 @@ public class CafeAdminController {
         return staff;
     }
 
+    @Idempotent("STAFF_CREATE")
     @PostMapping("/staff")
     @Audited(action = AuditActions.STAFF_CREATED, entityType = AuditActions.ENTITY_USER)
     public User createOperator(@RequestBody User staffReq, Authentication auth) {
@@ -132,11 +135,12 @@ public class CafeAdminController {
         return created;
     }
 
+    @Idempotent("STAFF_DELETE")
     @DeleteMapping("/staff/{uid}")
     @Audited(action = AuditActions.STAFF_DELETED, entityType = AuditActions.ENTITY_USER, entityIdParam = "uid")
     public ResponseEntity<?> deleteOperator(@PathVariable String uid, Authentication auth) {
         String cafeId = getCafeId(auth);
-        User op = userRepository.findById(uid).orElse(null);
+        User op = userRepository.findForUpdate(uid).orElse(null);
 
         // Security Check: only staff belonging to this admin's cafe may be deleted
         if (op == null || !cafeId.equals(op.getCafeId())) {
@@ -153,6 +157,7 @@ public class CafeAdminController {
         return ResponseEntity.ok().build();
     }
 
+    @Idempotent("STAFF_UPDATE")
     @PutMapping("/staff/{id}")
     @PreAuthorize("hasRole('CAFE_ADMIN')")
     @Audited(action = AuditActions.STAFF_UPDATED, entityType = AuditActions.ENTITY_USER, entityIdParam = "id")
@@ -162,7 +167,7 @@ public class CafeAdminController {
 
         // 1. Find the existing operator (must belong to this admin's cafe)
         logger.info("Update operator {} requested", id);
-        User op = userRepository.findById(id).orElse(null);
+        User op = userRepository.findForUpdate(id).orElse(null);
         if (op == null || !cafeId.equals(op.getCafeId())) {
             logger.warn("Update operator rejected: {} not found in this cafe", id);
             return ResponseEntity.status(404).body(Map.of("message", "Operator not found"));
@@ -217,6 +222,7 @@ public class CafeAdminController {
         return gameTypeRepository.findByCafeId(getCafeId(auth));
     }
 
+    @Idempotent("GAME_TYPE_CREATE")
     @PostMapping("/game-types")
     @Audited(action = AuditActions.GAME_TYPE_CREATED, entityType = AuditActions.ENTITY_GAME_TYPE)
     public GameType createGameType(@RequestBody GameType gt, Authentication auth) {
@@ -228,12 +234,13 @@ public class CafeAdminController {
         return saved;
     }
 
+    @Idempotent("GAME_TYPE_DELETE")
     @DeleteMapping("/game-types/{gid}")
     @Audited(action = AuditActions.GAME_TYPE_DELETED, entityType = AuditActions.ENTITY_GAME_TYPE, entityIdParam = "gid")
     public ResponseEntity<?> deleteGameType(@PathVariable String gid, Authentication auth) {
         String cafeId = getCafeId(auth);
 
-        GameType gt = gameTypeRepository.findById(gid).orElse(null);
+        GameType gt = gameTypeRepository.findForUpdate(gid).orElse(null);
 
         // Security Check: Make sure it exists AND belongs to this specific cafe
         if (gt == null || !gt.getCafeId().equals(cafeId)) {
@@ -256,27 +263,54 @@ public class CafeAdminController {
         return rateCardRepository.findByCafeId(getCafeId(auth));
     }
 
+    /** Always creates a new rate card (an id in the body is ignored; edits use PUT). */
+    @Idempotent("RATE_CARD_CREATE")
     @PostMapping("/rate-cards")
-    @Audited(action = AuditActions.RATE_CARD_UPDATED, entityType = AuditActions.ENTITY_RATE_CARD)
+    @Audited(action = AuditActions.RATE_CARD_CREATED, entityType = AuditActions.ENTITY_RATE_CARD)
     public RateCard createRateCard(@RequestBody RateCard rc, Authentication auth) {
+        rc.setId(null);
         rc.setCafeId(getCafeId(auth));
-        Map<String, Object> before = rc.getId() == null ? null
-                : rateCardRepository.findById(rc.getId()).map(CafeAdminController::rateCardSnapshot).orElse(null);
         RateCard saved = rateCardRepository.save(rc);
-        audit.record(AuditRecord.of(before == null ? AuditActions.RATE_CARD_CREATED : AuditActions.RATE_CARD_UPDATED)
-                .entity(AuditActions.ENTITY_RATE_CARD, saved.getId())
-                .description((before == null ? "Created rate card '" : "Changed prices on rate card '") + saved.getName() + "'")
-                .diff(before, rateCardSnapshot(saved)));
-        logger.info("Rate card saved: id={} grace={} interval={}", saved.getId(), saved.getGraceMinutes(), saved.getBillingIntervalMinutes());
+        audit.record(AuditRecord.of(AuditActions.RATE_CARD_CREATED).entity(AuditActions.ENTITY_RATE_CARD, saved.getId())
+                .description("Created rate card '" + saved.getName() + "'")
+                .diff(null, rateCardSnapshot(saved)));
+        logger.info("Rate card created: id={} grace={} interval={}", saved.getId(), saved.getGraceMinutes(), saved.getBillingIntervalMinutes());
         return saved;
     }
 
+    /** Edits a rate card of this cafe (the UI's edit dialog calls this; it had no endpoint before). */
+    @Idempotent("RATE_CARD_UPDATE")
+    @PutMapping("/rate-cards/{rid}")
+    @Audited(action = AuditActions.RATE_CARD_UPDATED, entityType = AuditActions.ENTITY_RATE_CARD, entityIdParam = "rid")
+    public ResponseEntity<?> updateRateCard(@PathVariable String rid, @RequestBody RateCard updates, Authentication auth) {
+        String cafeId = getCafeId(auth);
+        RateCard rc = rateCardRepository.findForUpdate(rid).orElse(null);
+        if (rc == null || !cafeId.equals(rc.getCafeId())) {
+            logger.warn("Update rate card: {} not found in this cafe", rid);
+            return ResponseEntity.status(404).body(Map.of("detail", "Rate card not found"));
+        }
+        Map<String, Object> before = rateCardSnapshot(rc);
+        if (updates.getName() != null) rc.setName(updates.getName());
+        if (updates.getGameTypeId() != null) rc.setGameTypeId(updates.getGameTypeId());
+        if (updates.getWeekdayPrices() != null) rc.setWeekdayPrices(updates.getWeekdayPrices());
+        if (updates.getBillingIntervalMinutes() != null) rc.setBillingIntervalMinutes(updates.getBillingIntervalMinutes());
+        if (updates.getGraceMinutes() != null) rc.setGraceMinutes(updates.getGraceMinutes());
+        if (updates.getPlayerCounts() != null) rc.setPlayerCounts(updates.getPlayerCounts());
+        RateCard saved = rateCardRepository.save(rc);
+        audit.record(AuditRecord.of(AuditActions.RATE_CARD_UPDATED).entity(AuditActions.ENTITY_RATE_CARD, rid)
+                .description("Changed rate card '" + saved.getName() + "'")
+                .diff(before, rateCardSnapshot(saved)));
+        logger.info("Rate card updated: id={} grace={} interval={}", rid, saved.getGraceMinutes(), saved.getBillingIntervalMinutes());
+        return ResponseEntity.ok(saved);
+    }
+
+    @Idempotent("RATE_CARD_DELETE")
     @DeleteMapping("/rate-cards/{rid}")
     @Audited(action = AuditActions.RATE_CARD_DELETED, entityType = AuditActions.ENTITY_RATE_CARD, entityIdParam = "rid")
     public ResponseEntity<?> deleteRateCard(@PathVariable String rid, Authentication auth) {
         String cafeId = getCafeId(auth);
 
-        RateCard rc = rateCardRepository.findById(rid).orElse(null);
+        RateCard rc = rateCardRepository.findForUpdate(rid).orElse(null);
         if (rc == null || !rc.getCafeId().equals(cafeId)) {
             logger.warn("Delete rate card: {} not found in this cafe", rid);
             return ResponseEntity.notFound().build();
@@ -333,28 +367,54 @@ public class CafeAdminController {
         return response;
     }
 
+    /** Always creates a new resource (an id in the body is ignored; edits use PUT). */
+    @Idempotent("RESOURCE_CREATE")
     @PostMapping("/resources")
-    @Audited(action = AuditActions.RESOURCE_UPDATED, entityType = AuditActions.ENTITY_RESOURCE)
+    @Audited(action = AuditActions.RESOURCE_CREATED, entityType = AuditActions.ENTITY_RESOURCE)
     public Resource createResource(@RequestBody Resource res, Authentication auth) {
+        res.setId(java.util.UUID.randomUUID().toString());
         res.setCafeId(getCafeId(auth));
-        Map<String, Object> before = res.getId() == null ? null
-                : resourceRepository.findById(res.getId()).map(CafeAdminController::resourceSnapshot).orElse(null);
         Resource saved = resourceRepository.save(res);
-        audit.record(AuditRecord.of(before == null ? AuditActions.RESOURCE_CREATED : AuditActions.RESOURCE_UPDATED)
-                .entity(AuditActions.ENTITY_RESOURCE, saved.getId())
-                .description((before == null ? "Added resource '" : "Edited resource '") + saved.getName() + "'")
-                .diff(before, resourceSnapshot(saved)));
-        logger.info("Resource saved: id={} name='{}' gameType={} rateCard={}",
+        audit.record(AuditRecord.of(AuditActions.RESOURCE_CREATED).entity(AuditActions.ENTITY_RESOURCE, saved.getId())
+                .description("Added resource '" + saved.getName() + "'")
+                .diff(null, resourceSnapshot(saved)));
+        logger.info("Resource created: id={} name='{}' gameType={} rateCard={}",
                 saved.getId(), saved.getName(), saved.getGameTypeId(), saved.getRateCardId());
         return saved;
     }
 
+    /** Edits a resource of this cafe (the UI's edit dialog calls this; it had no endpoint before). */
+    @Idempotent("RESOURCE_UPDATE")
+    @PutMapping("/resources/{rid}")
+    @Audited(action = AuditActions.RESOURCE_UPDATED, entityType = AuditActions.ENTITY_RESOURCE, entityIdParam = "rid")
+    public ResponseEntity<?> updateResource(@PathVariable String rid, @RequestBody Resource updates, Authentication auth) {
+        String cafeId = getCafeId(auth);
+        Resource res = resourceRepository.findForUpdate(rid).orElse(null);
+        if (res == null || !cafeId.equals(res.getCafeId())) {
+            logger.warn("Update resource: {} not found in this cafe", rid);
+            return ResponseEntity.status(404).body(Map.of("detail", "Resource not found"));
+        }
+        Map<String, Object> before = resourceSnapshot(res);
+        if (updates.getName() != null) res.setName(updates.getName());
+        if (updates.getGameTypeId() != null) res.setGameTypeId(updates.getGameTypeId());
+        if (updates.getRateCardId() != null) res.setRateCardId(updates.getRateCardId());
+        if (updates.getIsActive() != null) res.setIsActive(updates.getIsActive());
+        Resource saved = resourceRepository.save(res);
+        audit.record(AuditRecord.of(AuditActions.RESOURCE_UPDATED).entity(AuditActions.ENTITY_RESOURCE, rid)
+                .description("Edited resource '" + saved.getName() + "'")
+                .diff(before, resourceSnapshot(saved)));
+        logger.info("Resource updated: id={} name='{}' gameType={} rateCard={}",
+                rid, saved.getName(), saved.getGameTypeId(), saved.getRateCardId());
+        return ResponseEntity.ok(saved);
+    }
+
+    @Idempotent("RESOURCE_DELETE")
     @DeleteMapping("/resources/{rid}")
     @Audited(action = AuditActions.RESOURCE_DELETED, entityType = AuditActions.ENTITY_RESOURCE, entityIdParam = "rid")
     public ResponseEntity<?> deleteResource(@PathVariable String rid, Authentication auth) {
         String cafeId = getCafeId(auth);
 
-        Resource res = resourceRepository.findById(rid).orElse(null);
+        Resource res = resourceRepository.findForUpdate(rid).orElse(null);
         if (res == null || !res.getCafeId().equals(cafeId)) {
             logger.warn("Delete resource: {} not found in this cafe", rid);
             return ResponseEntity.notFound().build();
@@ -379,6 +439,7 @@ public class CafeAdminController {
         return accessoryRepository.findByCafeId(getCafeId(auth));
     }
 
+    @Idempotent("ACCESSORY_CREATE")
     @PostMapping("/accessories")
     @Audited(action = AuditActions.ACCESSORY_CREATED, entityType = AuditActions.ENTITY_ACCESSORY)
     public Accessory createAccessory(@RequestBody Accessory acc, Authentication auth) {
@@ -391,12 +452,13 @@ public class CafeAdminController {
         return saved;
     }
 
+    @Idempotent("ACCESSORY_UPDATE")
     @PutMapping("/accessories/{aid}")
     @Audited(action = AuditActions.ACCESSORY_UPDATED, entityType = AuditActions.ENTITY_ACCESSORY, entityIdParam = "aid")
     public ResponseEntity<?> updateAccessory(@PathVariable String aid, @RequestBody Accessory updates, Authentication auth) {
         String cafeId = getCafeId(auth);
 
-        Accessory existingAcc = accessoryRepository.findById(aid).orElse(null);
+        Accessory existingAcc = accessoryRepository.findForUpdate(aid).orElse(null);
         if (existingAcc == null || !existingAcc.getCafeId().equals(cafeId)) {
             logger.warn("Update accessory: {} not found in this cafe", aid);
             return ResponseEntity.notFound().build();
@@ -415,12 +477,13 @@ public class CafeAdminController {
         return ResponseEntity.ok(existingAcc);
     }
 
+    @Idempotent("ACCESSORY_DELETE")
     @DeleteMapping("/accessories/{aid}")
     @Audited(action = AuditActions.ACCESSORY_DELETED, entityType = AuditActions.ENTITY_ACCESSORY, entityIdParam = "aid")
     public ResponseEntity<?> deleteAccessory(@PathVariable String aid, Authentication auth) {
         String cafeId = getCafeId(auth);
 
-        Accessory acc = accessoryRepository.findById(aid).orElse(null);
+        Accessory acc = accessoryRepository.findForUpdate(aid).orElse(null);
         if (acc == null || !acc.getCafeId().equals(cafeId)) {
             logger.warn("Delete accessory: {} not found in this cafe", aid);
             return ResponseEntity.notFound().build();

@@ -60,6 +60,9 @@ public final class MembershipCardRequests {
         @JsonProperty("bonus_paise")
         private Long bonusPaise;
         private String reason;
+        /** Set from the Idempotency-Key: the ledger refuses a second adjustment with the same id. */
+        @JsonProperty("request_id")
+        private String requestId;
     }
 
     /** Admin: move the expiry date later. */

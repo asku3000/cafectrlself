@@ -6,6 +6,7 @@ import com.progameflixx.cafectrl.audit.AuditFormat;
 import com.progameflixx.cafectrl.audit.AuditRecord;
 import com.progameflixx.cafectrl.audit.AuditService;
 import com.progameflixx.cafectrl.audit.Audited;
+import com.progameflixx.cafectrl.idempotency.Idempotent;
 import com.progameflixx.cafectrl.logging.LogContext;
 
 import com.progameflixx.cafectrl.dto.DebtClearRequest;
@@ -53,13 +54,16 @@ public class PendingPaymentController {
 
     @PostMapping("/{id}/clear")
     @Audited(action = AuditActions.PENDING_PAYMENT_SETTLED, entityType = AuditActions.ENTITY_PENDING_PAYMENT, entityIdParam = "id")
+    @Idempotent("PENDING_SETTLE")
     @PreAuthorize("hasAnyRole('CAFE_ADMIN', 'OPERATOR')")
     @Transactional // <-- CRITICAL: If the server crashes on row 2, the whole split rolls back instantly!
     public ResponseEntity<?> clearPayment(@PathVariable Long id, @RequestBody DebtClearRequest req, Authentication auth) {
         String cafeId = getCafeId(auth);
 
         logger.info("Clear pending payment {} requested: payments={}", id, req.getPayments());
-        PendingPayment existingDebt = pendingPaymentRepository.findById(id).orElse(null);
+        // Locked: two settlements of the same debt (two devices, retries) run one after the other, and the
+        // second one then sees CLEARED and is refused
+        PendingPayment existingDebt = pendingPaymentRepository.findForUpdate(id).orElse(null);
 
         // Security Check: the debt must belong to the caller's cafe
         if (existingDebt == null || !cafeId.equals(existingDebt.getCafeId())) {

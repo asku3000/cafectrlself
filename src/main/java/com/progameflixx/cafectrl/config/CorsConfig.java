@@ -31,9 +31,12 @@ public class CorsConfig {
         configuration.setAllowedOrigins(Collections.singletonList(corsOriginUrl));
 
         // MUST allow OPTIONS for preflight requests!
-        configuration.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "OPTIONS"));
+        configuration.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
 
-        configuration.setAllowedHeaders(Arrays.asList("Authorization", "Cache-Control", "Content-Type"));
+        // Idempotency-Key: sent with every critical write (double-submit protection)
+        configuration.setAllowedHeaders(Arrays.asList("Authorization", "Cache-Control", "Content-Type", "Idempotency-Key"));
+        // response headers the UI reads (export file name / truncation flag, replayed-request marker, request id for support)
+        configuration.setExposedHeaders(Arrays.asList("Content-Disposition", "X-Export-Truncated", "Idempotent-Replay", "X-Request-Id"));
         configuration.setAllowCredentials(true); // Required if sending cookies/tokens
 
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();

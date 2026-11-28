@@ -46,3 +46,7 @@ audit:
     enabled: false
     batch-size: 1000
     batch-pause-ms: 0
+
+idempotency:
+  cleanup:
+    enabled: false

@@ -10,6 +10,7 @@ import com.progameflixx.cafectrl.entity.User;
 import com.progameflixx.cafectrl.audit.AuditActions;
 import com.progameflixx.cafectrl.audit.AuditService;
 import com.progameflixx.cafectrl.audit.Audited;
+import com.progameflixx.cafectrl.idempotency.Idempotent;
 import com.progameflixx.cafectrl.service.CurrentUserService;
 import com.progameflixx.cafectrl.service.MembershipCardService;
 import org.slf4j.Logger;
@@ -83,33 +84,43 @@ public class MembershipCardController {
     }
 
     @Audited(action = AuditActions.CARD_ISSUED, entityType = AuditActions.ENTITY_MEMBERSHIP_CARD)
+    @Idempotent("CARD_ISSUE")
     @PostMapping
-    public MembershipCardView issue(@RequestBody MembershipCardRequests.Issue req, Authentication auth) {
+    public MembershipCardView issue(@RequestBody MembershipCardRequests.Issue req, Authentication auth,
+                                    @RequestHeader(value = "Idempotency-Key", required = false) String idemKey) {
         User user = currentUser.require(auth);
+        if (req.getRequestId() == null) req.setRequestId(idemKey);
         CurrentUserService.requirePermission(user, CurrentUserService.PERM_MEMBERSHIPS);
         MembershipCard card = idempotent(() -> cardService.issue(user, req), "ISSUE", user, req.getRequestId());
         return cardService.toView(card);
     }
 
     @Audited(action = AuditActions.CARD_RECHARGED, entityType = AuditActions.ENTITY_MEMBERSHIP_CARD, entityIdParam = "id")
+    @Idempotent("CARD_RECHARGE")
     @PostMapping("/{id}/recharge")
-    public MembershipCardView recharge(@PathVariable String id, @RequestBody MembershipCardRequests.Recharge req, Authentication auth) {
+    public MembershipCardView recharge(@PathVariable String id, @RequestBody MembershipCardRequests.Recharge req, Authentication auth,
+                                       @RequestHeader(value = "Idempotency-Key", required = false) String idemKey) {
         User user = currentUser.require(auth);
+        if (req.getRequestId() == null) req.setRequestId(idemKey);
         CurrentUserService.requirePermission(user, CurrentUserService.PERM_MEMBERSHIPS);
         MembershipCard card = idempotent(() -> cardService.recharge(user, id, req), "RECHARGE", user, req.getRequestId());
         return cardService.toView(card);
     }
 
     @Audited(action = AuditActions.CARD_ADJUSTED, entityType = AuditActions.ENTITY_MEMBERSHIP_CARD, entityIdParam = "id")
+    @Idempotent("CARD_ADJUST")
     @PostMapping("/{id}/adjust")
     @PreAuthorize("hasRole('CAFE_ADMIN')")
-    public MembershipCardView adjust(@PathVariable String id, @RequestBody MembershipCardRequests.Adjust req, Authentication auth) {
+    public MembershipCardView adjust(@PathVariable String id, @RequestBody MembershipCardRequests.Adjust req, Authentication auth,
+                                     @RequestHeader(value = "Idempotency-Key", required = false) String idemKey) {
         User user = currentUser.require(auth);
+        if (req.getRequestId() == null) req.setRequestId(idemKey);
         MembershipCard card = cardService.adjust(user, id, req);
         return cardService.toView(card);
     }
 
     @Audited(action = AuditActions.CARD_EXPIRY_EXTENDED, entityType = AuditActions.ENTITY_MEMBERSHIP_CARD, entityIdParam = "id")
+    @Idempotent("CARD_EXTEND")
     @PostMapping("/{id}/extend")
     @PreAuthorize("hasRole('CAFE_ADMIN')")
     public MembershipCardView extend(@PathVariable String id, @RequestBody MembershipCardRequests.Extend req, Authentication auth) {
@@ -119,6 +130,7 @@ public class MembershipCardController {
     }
 
     @Audited(action = AuditActions.CARD_START_DATE_CHANGED, entityType = AuditActions.ENTITY_MEMBERSHIP_CARD, entityIdParam = "id")
+    @Idempotent("CARD_START_DATE")
     @PostMapping("/{id}/start-date")
     @PreAuthorize("hasRole('CAFE_ADMIN')")
     public MembershipCardView changeStartDate(@PathVariable String id, @RequestBody MembershipCardRequests.ChangeStart req, Authentication auth) {
@@ -128,6 +140,7 @@ public class MembershipCardController {
     }
 
     @Audited(action = "CARD_STATUS_CHANGE", entityType = AuditActions.ENTITY_MEMBERSHIP_CARD, entityIdParam = "id")
+    @Idempotent("CARD_STATUS")
     @PostMapping("/{id}/status")
     @PreAuthorize("hasRole('CAFE_ADMIN')")
     public MembershipCardView changeStatus(@PathVariable String id, @RequestBody MembershipCardRequests.StatusChange req, Authentication auth) {

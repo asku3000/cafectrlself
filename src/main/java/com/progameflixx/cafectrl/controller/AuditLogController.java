@@ -70,6 +70,8 @@ public class AuditLogController {
         return body;
     }
 
+    // No @Idempotent here: the purge commits in batches under its own lock (a second concurrent run gets 409),
+    // so it must not be wrapped in one long request transaction.
     @PostMapping("/purge")
     public ResponseEntity<Map<String, Object>> runPurge(@RequestParam(name = "dry_run", defaultValue = "true") boolean dryRun,
                                                         @RequestParam(name = "cafe_id", required = false) String cafeId,
