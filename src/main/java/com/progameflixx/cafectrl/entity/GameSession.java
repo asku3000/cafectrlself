@@ -79,7 +79,8 @@ public class GameSession {
 
     @Column(name = "player_count")
     @JsonProperty("player_count")
-    private Integer playerCount = 1;
+    // No default: every new game gets its count from PlayerCountPolicy (a silent 1 billed PS5 groups at the solo rate)
+    private Integer playerCount;
 
     // FIX: Added total so the React UI modal can display the calculated game bill
     @Transient

@@ -72,6 +72,8 @@ public class SessionController {
 
     @Autowired
     private com.progameflixx.cafectrl.service.CurrentUserService currentUserService;
+    @Autowired
+    private com.progameflixx.cafectrl.service.PlayerCountPolicy playerCountPolicy;
 
     private String getCafeId(Authentication auth) {
         String cafeId = userRepository.findByEmail(auth.getName()).orElseThrow().getCafeId();
@@ -101,6 +103,8 @@ public class SessionController {
             return ResponseEntity.badRequest().body("Resource not found");
         }
         requireResourceFree(cafeId, resource);
+        // Player-priced resources (e.g. PS5) need an explicit count; nothing is filled in silently
+        int playerCount = playerCountPolicy.resolve(resource, payload.get("player_count"));
 
         // --- INSIDE startSession() ---
 
@@ -134,7 +138,7 @@ public class SessionController {
             game.setStartTime(LocalDateTime.now());
         }
 
-        game.setPlayerCount(payload.containsKey("player_count") ? (Integer) payload.get("player_count") : 1);
+        game.setPlayerCount(playerCount);
         game.setStatus("active");
 
         session.addGame(game);
@@ -307,6 +311,7 @@ public class SessionController {
             return ResponseEntity.badRequest().body("Resource not found");
         }
         requireResourceFree(cafeId, resource);
+        int playerCount = playerCountPolicy.resolve(resource, payload.get("player_count"));
 
         GameSession game = new GameSession();
         game.setResourceId(resource.getId());
@@ -322,7 +327,7 @@ public class SessionController {
             game.setStartTime(LocalDateTime.now());
         }
 
-        game.setPlayerCount(payload.containsKey("player_count") ? (Integer) payload.get("player_count") : 1);
+        game.setPlayerCount(playerCount);
         game.setStatus("active");
 
         session.addGame(game); // Hibernate automatically saves this to the database!
